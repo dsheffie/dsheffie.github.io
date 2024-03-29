@@ -195,7 +195,7 @@ var Module = typeof Module != 'undefined' ? Module : {};
     }
 
     }
-    loadPackage({"files": [{"filename": "/bbl.bin0.bin", "start": 0, "end": 12468400}], "remote_package_size": 12468400, "package_uuid": "83453e54-7a76-4044-9f79-82c4843dbcf2"});
+    loadPackage({"files": [{"filename": "/bbl.bin0.bin", "start": 0, "end": 12468400}], "remote_package_size": 12468400, "package_uuid": "27bd09c8-4623-4290-8f75-547fe9d3b0a7"});
 
   })();
 
