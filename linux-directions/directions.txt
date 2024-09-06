@@ -41,3 +41,16 @@ create checkpoint at instruction 0 -
 
 create checkpoint "whenever"
 * you can use ISS to "fast forward" then dump a checkpoint.  I restore state with verilator (CSRs/GPRs) for the RTL environment. Does not currently work for FPGA
+
+build rtl model with verilator
+* git clone https://github.com/dsheffie/rv64core.git
+** I use Verilator 4.200 2021-03-12 rev UNKNOWN.REV
+** Different versions might work (not sure - Verilator versions can be hit or miss)
+* my makefile builds with LTO, if you have LTO issues, just delete "-flto" options
+* make (probably need addtional packages, should be standard ubuntu ones)
+
+run on verilated model
+* if you're starting from the 0th instruction, "rv64_core -f <whatever>.chpt -d 1 -c 1"
+** the -c 1 option means "check the output of every retired instruction with the instruction set simulator"
+*** checker will fail after about 100M instructions on a rdtime instruction (need to fix, someday)
+** the -c 0 option will disable the checker. if you've taken a checkpoint after the 0th instruction, you'll need to run this way
