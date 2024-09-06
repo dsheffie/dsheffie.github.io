@@ -7,11 +7,13 @@ check out my ISS - used to create FDT and initial RAM image for RTL environment
 
 buildroot -
 * git clone https://github.com/buildroot/buildroot.git
+* download https://dsheffie.github.io/linux-directions/buildroot.config
 * move my buildroot.config to .config within the buildroot directory
 * type make to build (we really only need the gcc but oh well, gonna build a bunch of stuff)
 
 prepare initramfs image - 
 * you can use mine as a starting point (initramfs.tar.gz)
+** wget https://dsheffie.github.io/linux-directions/initramfs.tar.gz
 ** if you want to change things around, just add files to the "root" folder
 ** root/init defines what gets run after boot
 * tar xf initramfs.tar.gz
@@ -20,16 +22,22 @@ prepare initramfs image -
 
 linux - 
 * git clone https://github.com/torvalds/linux.git --branch=v5.10
+* download patches
+** wget https://dsheffie.github.io/linux-directions/0001-hacked-in-console-output-through-a-csr.patch
+** wget https://dsheffie.github.io/linux-directions/0002-my-crappy-csr-tty-driver-hacked-together-from-other-.patch
+** wget https://dsheffie.github.io/linux-directions/0003-report-number-of-instructions-in-a-boot.patch
 * copy patches into linux directory, then apply
 ** git am 0001-hacked-in-console-output-through-a-csr.patch
 ** git am 0002-my-crappy-csr-tty-driver-hacked-together-from-other-.patch
-** git am 0003-report-number-of-instructions-in-a-boot.patch 
+** git am 0003-report-number-of-instructions-in-a-boot.patch
+* download linux .config : wget https://dsheffie.github.io/linux-directions/linux-510.config
 * mv linux-510.config to .config within the linux directory
 ** you will need to edit the .config to update the variable CONFIG_INITRAMFS_SOURCE to <whereever your initramfs.cpio lives>
 * type : make ARCH=riscv CROSS_COMPILE=<whereever you built buildroot>/output/host/bin/riscv64-buildroot-linux-gnu- -j<number of cpus>
 * create symlink to kernel : ln -s arch/riscv/boot/Image kernel.bin
 
 test things out with iss -
+* download bbl.bin : wget https://dsheffie.github.io/linux-directions/bbl.bin
 * copy my bbl.bin into the linux directory (i can't remember what i did to the Berkeley Boot Loader - probably just disabled compressed ISA)
 ** todo : find where i hacked bbl and create patches
 * make sure linux actually boots on the ISS : <whereever you cloned interp_riscv>/interp_rv64 -f bbl.bin -r 1
