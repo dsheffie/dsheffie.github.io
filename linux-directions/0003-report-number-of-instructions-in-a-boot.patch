@@ -1,0 +1,36 @@
+From 4bbcf5e66f25b4ad2c107645b1b4ffcc105900cd Mon Sep 17 00:00:00 2001
+From: David Sheffield <sheffield.david@gmail.com>
+Date: Thu, 5 Sep 2024 20:20:24 -0700
+Subject: [PATCH 3/3] report number of instructions in a boot
+
+---
+ init/main.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/init/main.c b/init/main.c
+index c496633db2e2..dae548dce085 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -1338,7 +1338,7 @@ static void __init do_pre_smp_initcalls(void)
+ static int run_init_process(const char *init_filename)
+ {
+ 	const char *const *p;
+-
++	u64 icnt;
+ 	argv_init[0] = init_filename;
+ 	pr_info("Run %s as init process\n", init_filename);
+ 	pr_debug("  with arguments:\n");
+@@ -1346,7 +1346,9 @@ static int run_init_process(const char *init_filename)
+ 		pr_debug("    %s\n", *p);
+ 	pr_debug("  with environment:\n");
+ 	for (p = envp_init; *p; p++)
+-		pr_debug("    %s\n", *p);
++	  pr_debug("    %s\n", *p);
++	icnt = csr_read(CSR_INSTRET);
++	pr_info("linux boot took %lu instructions\n", icnt);
+ 	return kernel_execve(init_filename, argv_init, envp_init);
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,43 @@
+tested on ubuntu 22.04/ubuntu 24.04 for aarch64/amd64
+
+check out my ISS - used to create FDT and initial RAM image for RTL environment
+* git clone https://github.com/dsheffie/interp_rv64
+* make to build (will probably need to install handful of packages)
+
+
+buildroot -
+* git clone https://github.com/buildroot/buildroot.git
+* move my buildroot.config to .config within the buildroot directory
+* type make to build (we really only need the gcc but oh well, gonna build a bunch of stuff)
+
+prepare initramfs image - 
+* you can use mine as a starting point (initramfs.tar.gz)
+** if you want to change things around, just add files to the "root" folder
+** root/init defines what gets run after boot
+* tar xf initramfs.tar.gz
+* create cpio archive : pushd initramfs/root; find . | cpio -o -H newc > ../initramfs.cpio; popd
+
+
+linux - 
+* git clone https://github.com/torvalds/linux.git --branch=v5.10
+* copy patches into linux directory, then apply
+** git am 0001-hacked-in-console-output-through-a-csr.patch
+** git am 0002-my-crappy-csr-tty-driver-hacked-together-from-other-.patch
+** git am 0003-report-number-of-instructions-in-a-boot.patch 
+* mv linux-510.config to .config within the linux directory
+** you will need to edit the .config to update the variable CONFIG_INITRAMFS_SOURCE to <whereever your initramfs.cpio lives>
+* type : make ARCH=riscv CROSS_COMPILE=<whereever you built buildroot>/output/host/bin/riscv64-buildroot-linux-gnu- -j<number of cpus>
+* create symlink to kernel : ln -s arch/riscv/boot/Image kernel.bin
+
+test things out with iss -
+* copy my bbl.bin into the linux directory (i can't remember what i did to the Berkeley Boot Loader - probably just disabled compressed ISA)
+** todo : find where i hacked bbl and create patches
+* make sure linux actually boots on the ISS : <whereever you cloned interp_riscv>/interp_rv64 -f bbl.bin -r 1
+** control-c to terminate once you've seen enough to believe you have a reasonable environment (will run dhrystone as a user app)
+
+create checkpoint at instruction 0 -
+*  <whereever you cloned interp_riscv>/interp_rv64 -f bbl.bin -r 1 --dump 0 (this will dump machine state after the fdt and initial ram image has been created
+** will create "bbl.bin0.rv64.chpt" which can be used with a FPGA environment or RTL simulation environment
+
+create checkpoint "whenever"
+* you can use ISS to "fast forward" then dump a checkpoint.  I restore state with verilator (CSRs/GPRs) for the RTL environment. Does not currently work for FPGA

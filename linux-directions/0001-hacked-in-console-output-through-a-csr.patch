@@ -1,0 +1,486 @@
+From 0f0323e72299f8b8d0c2f0ce2dab399a66de8f96 Mon Sep 17 00:00:00 2001
+From: David Sheffield <sheffield.david@gmail.com>
+Date: Fri, 23 Aug 2024 10:08:01 -0700
+Subject: [PATCH 1/3] hacked in console output through a csr
+
+---
+ arch/riscv/Makefile                     |  4 +-
+ arch/riscv/kernel/sbi.c                 |  2 +-
+ arch/riscv/mm/fault.c                   |  2 +-
+ arch/riscv/mm/init.c                    | 11 ++-
+ drivers/misc/Kconfig                    |  4 +
+ drivers/misc/Makefile                   |  2 +-
+ drivers/misc/csr_console.c              | 57 +++++++++++++++
+ drivers/tty/serial/earlycon-riscv-sbi.c |  5 +-
+ drivers/tty/tty_ioctl.c                 | 97 ++++++++++++++-----------
+ init/initramfs.c                        |  5 +-
+ kernel/printk/printk.c                  | 30 ++++++--
+ mm/memblock.c                           | 29 +++++---
+ 12 files changed, 179 insertions(+), 69 deletions(-)
+ create mode 100644 drivers/misc/csr_console.c
+
+diff --git a/arch/riscv/Makefile b/arch/riscv/Makefile
+index 0289a97325d1..a98b9847b368 100644
+--- a/arch/riscv/Makefile
++++ b/arch/riscv/Makefile
+@@ -38,9 +38,9 @@ endif
+ 
+ # ISA string setting
+ riscv-march-$(CONFIG_ARCH_RV32I)	:= rv32ima
+-riscv-march-$(CONFIG_ARCH_RV64I)	:= rv64ima
++riscv-march-$(CONFIG_ARCH_RV64I)	:= rv64ima_zicsr_zifencei
+ riscv-march-$(CONFIG_FPU)		:= $(riscv-march-y)fd
+-riscv-march-$(CONFIG_RISCV_ISA_C)	:= $(riscv-march-y)c
++riscv-march-$(CONFIG_RISCV_ISA_C)	:= rv64ima_zicsr_zifencei 
+ KBUILD_CFLAGS += -march=$(subst fd,,$(riscv-march-y))
+ KBUILD_AFLAGS += -march=$(riscv-march-y)
+ 
+diff --git a/arch/riscv/kernel/sbi.c b/arch/riscv/kernel/sbi.c
+index 226ccce0f9e0..08cf29dc9c11 100644
+--- a/arch/riscv/kernel/sbi.c
++++ b/arch/riscv/kernel/sbi.c
+@@ -74,7 +74,7 @@ EXPORT_SYMBOL(sbi_err_map_linux_errno);
+  */
+ void sbi_console_putchar(int ch)
+ {
+-	sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0);
++  //sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0);
+ }
+ EXPORT_SYMBOL(sbi_console_putchar);
+ 
+diff --git a/arch/riscv/mm/fault.c b/arch/riscv/mm/fault.c
+index 3c8b9e433c67..60dd99b98cbe 100644
+--- a/arch/riscv/mm/fault.c
++++ b/arch/riscv/mm/fault.c
+@@ -31,7 +31,7 @@ static inline void no_context(struct pt_regs *regs, unsigned long addr)
+ 	 */
+ 	bust_spinlocks(1);
+ 	pr_alert("Unable to handle kernel %s at virtual address " REG_FMT "\n",
+-		(addr < PAGE_SIZE) ? "NULL pointer dereference" :
++		(addr < PAGE_SIZE)&0 ? "NULL pointer dereference" :
+ 		"paging request", addr);
+ 	die(regs, "Oops");
+ 	do_exit(SIGKILL);
+diff --git a/arch/riscv/mm/init.c b/arch/riscv/mm/init.c
+index 8e577f14f120..0472a3065aa0 100644
+--- a/arch/riscv/mm/init.c
++++ b/arch/riscv/mm/init.c
+@@ -112,6 +112,7 @@ static void __init setup_initrd(void)
+ 	/* Ignore the virtul address computed during device tree parsing */
+ 	initrd_start = initrd_end = 0;
+ 
++	
+ 	if (!phys_initrd_size)
+ 		return;
+ 	/*
+@@ -124,14 +125,16 @@ static void __init setup_initrd(void)
+ 	size = phys_initrd_size + (phys_initrd_start - start);
+ 	size = round_up(size, PAGE_SIZE);
+ 
++	printk(KERN_INFO "phys_initrd_start = %llx, size = %llx\n", (uint64_t)phys_initrd_start, (uint64_t)size);
++	
+ 	if (!memblock_is_region_memory(start, size)) {
+-		pr_err("INITRD: 0x%08llx+0x%08lx is not a memory region",
++		printk(KERN_INFO "INITRD: 0x%08llx+0x%08lx is not a memory region\n",
+ 		       (u64)start, size);
+ 		goto disable;
+ 	}
+ 
+ 	if (memblock_is_region_reserved(start, size)) {
+-		pr_err("INITRD: 0x%08llx+0x%08lx overlaps in-use memory region\n",
++	  printk(KERN_INFO "INITRD: 0x%08llx+0x%08lx overlaps in-use memory region\n",
+ 		       (u64)start, size);
+ 		goto disable;
+ 	}
+@@ -142,11 +145,11 @@ static void __init setup_initrd(void)
+ 	initrd_end = initrd_start + phys_initrd_size;
+ 	initrd_below_start_ok = 1;
+ 
+-	pr_info("Initial ramdisk at: 0x%p (%lu bytes)\n",
++	printk(KERN_INFO "Initial ramdisk at: 0x%p (%lu bytes)\n",
+ 		(void *)(initrd_start), size);
+ 	return;
+ disable:
+-	pr_cont(" - disabling initrd\n");
++	printk(KERN_INFO "INITRD BUSTED\n");
+ 	initrd_start = 0;
+ 	initrd_end = 0;
+ }
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index fafa8b0d8099..343eae551c52 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -5,6 +5,10 @@
+ 
+ menu "Misc devices"
+ 
++config CSR_CONSOLE
++       tristate "CSR console for RISCV"
++       depends on RISCV
++
+ config SENSORS_LIS3LV02D
+ 	tristate
+ 	depends on INPUT
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index d23231e73330..30d737c714e5 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -2,7 +2,7 @@
+ #
+ # Makefile for misc devices that really don't fit anywhere else.
+ #
+-
++obj-$(CONFIG_CSR_CONSOLE)       += csr_console.o
+ obj-$(CONFIG_IBM_ASM)		+= ibmasm/
+ obj-$(CONFIG_IBMVMC)		+= ibmvmc.o
+ obj-$(CONFIG_AD525X_DPOT)	+= ad525x_dpot.o
+diff --git a/drivers/misc/csr_console.c b/drivers/misc/csr_console.c
+new file mode 100644
+index 000000000000..93766536e318
+--- /dev/null
++++ b/drivers/misc/csr_console.c
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Simple kernel console driver for STM devices
++ * Copyright (c) 2014, Intel Corporation.
++ *
++ * STM console will send kernel messages over STM devices to a trace host.
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/console.h>
++#include <linux/slab.h>
++
++static int csr_console_setup(struct console *c, char *opts);
++static void csr_console_write(struct console *c, const char *buf, unsigned len);
++
++static struct console csr_console = {
++  .name = "csr_console",
++  .write		= csr_console_write,
++  .setup		= csr_console_setup,
++  .flags		= CON_PRINTBUFFER,
++  .index		= -1,
++};
++
++static int csr_console_setup(struct console *c, char *opts) {
++	return 0;
++}
++
++static void csr_print(char *buf, int len) {
++  int i;
++  for(i = 0; i < len; i++) {
++    while(csr_read(0xc03) != 0) {}
++    csr_write(0xc03, buf[i]);
++  }
++}
++
++static void csr_console_write(struct console *c, const char *buf, unsigned len) {
++  csr_print(buf, len);
++}
++
++static void __exit csr_console_exit(void) {
++  printk(KERN_INFO "HERE %s : %d\n", __PRETTY_FUNCTION__, __LINE__);  
++  unregister_console(&csr_console);
++}
++
++static int __init csr_console_init(void) {
++  printk(KERN_INFO "HERE %s : %d\n", __PRETTY_FUNCTION__, __LINE__);
++  register_console(&csr_console);
++  return 0;
++}
++
++module_init(csr_console_init);
++module_exit(csr_console_exit);
++
++MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("csr_console driver");
++MODULE_AUTHOR("David Sheffield");
+diff --git a/drivers/tty/serial/earlycon-riscv-sbi.c b/drivers/tty/serial/earlycon-riscv-sbi.c
+index ce81523c3113..622aa4fa87b4 100644
+--- a/drivers/tty/serial/earlycon-riscv-sbi.c
++++ b/drivers/tty/serial/earlycon-riscv-sbi.c
+@@ -12,7 +12,10 @@
+ 
+ static void sbi_putc(struct uart_port *port, int c)
+ {
+-	sbi_console_putchar(c);
++  sbi_console_putchar(c);
++  //while(csr_read(0xc03) != 0) {}
++  //csr_write(0xc03, c);
++
+ }
+ 
+ static void sbi_console_write(struct console *con,
+diff --git a/drivers/tty/tty_ioctl.c b/drivers/tty/tty_ioctl.c
+index e18f318586ab..84146e221b7a 100644
+--- a/drivers/tty/tty_ioctl.c
++++ b/drivers/tty/tty_ioctl.c
+@@ -25,6 +25,9 @@
+ #include <asm/io.h>
+ #include <linux/uaccess.h>
+ 
++void csr_print(char *buf, int len, int add_nl);
++
++
+ #undef TTY_DEBUG_WAIT_UNTIL_SENT
+ 
+ #ifdef TTY_DEBUG_WAIT_UNTIL_SENT
+@@ -891,53 +894,61 @@ int tty_perform_flush(struct tty_struct *tty, unsigned long arg)
+ }
+ EXPORT_SYMBOL_GPL(tty_perform_flush);
+ 
++
+ int n_tty_ioctl_helper(struct tty_struct *tty, struct file *file,
+ 		       unsigned int cmd, unsigned long arg)
+ {
+ 	int retval;
+-
+-	switch (cmd) {
+-	case TCXONC:
+-		retval = tty_check_change(tty);
+-		if (retval)
+-			return retval;
+-		switch (arg) {
+-		case TCOOFF:
+-			spin_lock_irq(&tty->flow_lock);
+-			if (!tty->flow_stopped) {
+-				tty->flow_stopped = 1;
+-				__stop_tty(tty);
+-			}
+-			spin_unlock_irq(&tty->flow_lock);
+-			break;
+-		case TCOON:
+-			spin_lock_irq(&tty->flow_lock);
+-			if (tty->flow_stopped) {
+-				tty->flow_stopped = 0;
+-				__start_tty(tty);
+-			}
+-			spin_unlock_irq(&tty->flow_lock);
+-			break;
+-		case TCIOFF:
+-			if (STOP_CHAR(tty) != __DISABLED_CHAR)
+-				retval = tty_send_xchar(tty, STOP_CHAR(tty));
+-			break;
+-		case TCION:
+-			if (START_CHAR(tty) != __DISABLED_CHAR)
+-				retval = tty_send_xchar(tty, START_CHAR(tty));
+-			break;
+-		default:
+-			return -EINVAL;
++	char buf[255];
++	sprintf(buf, "n_tty_ioctl_helper with cmd %u (TCXONC=%d, TCFLSH=%d), arg %lu\n", cmd, cmd==TCXONC, cmd==TCFLSH, arg);
++	csr_print(buf, strlen(buf), 0);
++	
++	switch (cmd)
++	  {
++	  case TCXONC:
++	    retval = tty_check_change(tty);
++	    if (retval)
++	      return retval;
++	    switch (arg)
++	      {
++	      case TCOOFF:
++		spin_lock_irq(&tty->flow_lock);
++		if (!tty->flow_stopped) {
++		  tty->flow_stopped = 1;
++		  __stop_tty(tty);
+ 		}
+-		return retval;
+-	case TCFLSH:
+-		retval = tty_check_change(tty);
+-		if (retval)
+-			return retval;
+-		return __tty_perform_flush(tty, arg);
+-	default:
+-		/* Try the mode commands */
+-		return tty_mode_ioctl(tty, file, cmd, arg);
+-	}
++		spin_unlock_irq(&tty->flow_lock);
++		break;
++	      case TCOON:
++		spin_lock_irq(&tty->flow_lock);
++		if (tty->flow_stopped) {
++		  tty->flow_stopped = 0;
++		  __start_tty(tty);
++		}
++		spin_unlock_irq(&tty->flow_lock);
++		break;
++	      case TCIOFF:
++		if (STOP_CHAR(tty) != __DISABLED_CHAR)
++		  retval = tty_send_xchar(tty, STOP_CHAR(tty));
++		break;
++	      case TCION:
++		if (START_CHAR(tty) != __DISABLED_CHAR)
++		  retval = tty_send_xchar(tty, START_CHAR(tty));
++		break;
++	      default:
++		return -EINVAL;
++	      } /* end arg switch */
++	    return retval;
++	  case TCFLSH:
++	    retval = tty_check_change(tty);
++	    if (retval)
++	      return retval;
++	    return __tty_perform_flush(tty, arg);
++	  default:
++	    /* Try the mode commands */
++	    sprintf(buf, "here %s:%d\n", __PRETTY_FUNCTION__, __LINE__);
++	    csr_print(buf,strlen(buf),0);
++	    return tty_mode_ioctl(tty, file, cmd, arg);
++	  }
+ }
+ EXPORT_SYMBOL(n_tty_ioctl_helper);
+diff --git a/init/initramfs.c b/init/initramfs.c
+index 55b74d7e5260..65cbb663fbc2 100644
+--- a/init/initramfs.c
++++ b/init/initramfs.c
+@@ -482,7 +482,7 @@ static char * __init unpack_to_rootfs(char *buf, unsigned long len)
+ 		}
+ 		this_header = 0;
+ 		decompress = decompress_method(buf, len, &compress_name);
+-		pr_debug("Detected %s compressed data\n", compress_name);
++		printk(KERN_INFO "Detected %s compressed data\n", compress_name);
+ 		if (decompress) {
+ 			int res = decompress(buf, len, NULL, flush_buffer, NULL,
+ 				   &my_inptr, error);
+@@ -495,8 +495,9 @@ static char * __init unpack_to_rootfs(char *buf, unsigned long len)
+ 					 compress_name);
+ 				message = msg_buf;
+ 			}
+-		} else
++		} else {
+ 			error("invalid magic at start of compressed archive");
++		}
+ 		if (state != Reset)
+ 			error("junk at the end of compressed archive");
+ 		this_header = saved_offset + my_inptr;
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+index bc1e3b5a97bd..fe9dcad4142d 100644
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -60,6 +60,20 @@
+ #include "braille.h"
+ #include "internal.h"
+ 
++
++void csr_print(char *buf, int len, int add_nl) {
++  int i;
++  for(i = 0; i < len; i++) {
++    while(csr_read(0xc03) != 0) {}
++    csr_write(0xc03, buf[i]);
++  }
++  if(add_nl) {
++    while(csr_read(0xc03) != 0) {}    
++    csr_write(0xc03, '\n');
++  }
++}
++
++
+ int console_printk[4] = {
+ 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
+ 	MESSAGE_LOGLEVEL_DEFAULT,	/* default_message_loglevel */
+@@ -534,6 +548,10 @@ static int log_store(u32 caller_id, int facility, int level,
+ 	else
+ 		prb_final_commit(&e);
+ 
++
++        if(r.info->flags & LOG_NEWLINE) {
++	  csr_print(&r.text_buf[0], r.info->text_len, 1);
++	}   		
+ 	return (text_len + trunc_msg_len);
+ }
+ 
+@@ -2752,7 +2770,7 @@ void register_console(struct console *newcon)
+ 			}
+ 		}
+ 	}
+-
++	
+ 	if (console_drivers && console_drivers->flags & CON_BOOT)
+ 		bcon = console_drivers;
+ 
+@@ -2781,12 +2799,14 @@ void register_console(struct console *newcon)
+ 	err = try_enable_new_console(newcon, true);
+ 
+ 	/* If not, try to match against the platform default(s) */
+-	if (err == -ENOENT)
+-		err = try_enable_new_console(newcon, false);
++	if (err == -ENOENT) {
++	  err = try_enable_new_console(newcon, false);
++	}
+ 
+ 	/* printk() messages are not printed to the Braille console. */
+-	if (err || newcon->flags & CON_BRL)
+-		return;
++	if (err || newcon->flags & CON_BRL) {
++	  return;
++	}
+ 
+ 	/*
+ 	 * If we have a bootconsole, and are switching to a real console,
+diff --git a/mm/memblock.c b/mm/memblock.c
+index b68ee86788af..686d514c39b2 100644
+--- a/mm/memblock.c
++++ b/mm/memblock.c
+@@ -180,13 +180,15 @@ static unsigned long __init_memblock memblock_addrs_overlap(phys_addr_t base1, p
+ bool __init_memblock memblock_overlaps_region(struct memblock_type *type,
+ 					phys_addr_t base, phys_addr_t size)
+ {
+-	unsigned long i;
+-
+-	for (i = 0; i < type->cnt; i++)
+-		if (memblock_addrs_overlap(base, size, type->regions[i].base,
+-					   type->regions[i].size))
+-			break;
+-	return i < type->cnt;
++  unsigned long i;
++  for (i = 0; i < type->cnt; i++) {
++    if (memblock_addrs_overlap(base, size, type->regions[i].base, type->regions[i].size)){
++      printk(KERN_INFO "base %llx with size %llx overlaps base %llx with size %llx\n",
++	     base, size, type->regions[i].base, type->regions[i].size);
++      break;
++    }
++  }
++  return i < type->cnt;
+ }
+ 
+ /**
+@@ -1748,7 +1750,7 @@ static int __init_memblock memblock_search(struct memblock_type *type, phys_addr
+ 
+ 	do {
+ 		unsigned int mid = (right + left) / 2;
+-
++		
+ 		if (addr < type->regions[mid].base)
+ 			right = mid;
+ 		else if (addr >= (type->regions[mid].base +
+@@ -1807,6 +1809,15 @@ int __init_memblock memblock_search_pfn_nid(unsigned long pfn,
+ bool __init_memblock memblock_is_region_memory(phys_addr_t base, phys_addr_t size)
+ {
+ 	int idx = memblock_search(&memblock.memory, base);
++	struct memblock_region *r;
++	printk(KERN_INFO "%s : %d, base %llx\n",
++	       __PRETTY_FUNCTION__, idx, (uint64_t)base);
++
++	for_each_mem_region(r) {
++	  printk(KERN_INFO ">> region base %llx, size %llx\n",
++		 r->base, r->size);
++	}
++	
+ 	phys_addr_t end = base + memblock_cap_size(base, &size);
+ 
+ 	if (idx == -1)
+@@ -1896,7 +1907,7 @@ static void __init_memblock memblock_dump(struct memblock_type *type)
+ static void __init_memblock __memblock_dump_all(void)
+ {
+ 	pr_info("MEMBLOCK configuration:\n");
+-	pr_info(" memory size = %pa reserved size = %pa\n",
++	printk(KERN_INFO ">>memory size = %pa reserved size = %pa\n",
+ 		&memblock.memory.total_size,
+ 		&memblock.reserved.total_size);
+ 
+-- 
+2.43.0
+
