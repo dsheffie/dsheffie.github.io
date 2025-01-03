@@ -1,0 +1,2716 @@
+diff --git a/arch/riscv/Kconfig b/arch/riscv/Kconfig
+index 9dfe95a12890..fa8f2da87a0a 100644
+--- a/arch/riscv/Kconfig
++++ b/arch/riscv/Kconfig
+@@ -167,6 +167,7 @@ config RISCV
+ 	select HAVE_LD_DEAD_CODE_DATA_ELIMINATION if !LD_IS_LLD
+ 	select HAVE_MOVE_PMD
+ 	select HAVE_MOVE_PUD
++	select HAVE_PAGE_SIZE_4KB
+ 	select HAVE_PCI
+ 	select HAVE_PERF_EVENTS
+ 	select HAVE_PERF_REGS
+@@ -253,7 +254,6 @@ config ARCH_MMAP_RND_COMPAT_BITS_MIN
+ # max bits determined by the following formula:
+ #  VA_BITS - PAGE_SHIFT - 3
+ config ARCH_MMAP_RND_BITS_MAX
+-	default 20 if 64BIT && RISCV_64K_PAGES # SV39 based
+ 	default 24 if 64BIT # SV39 based
+ 	default 17
+ 
+@@ -289,16 +289,6 @@ config PAGE_OFFSET
+ 	default 0xc0000000 if 32BIT
+ 	default 0xff60000000000000 if 64BIT
+ 
+-config RISCV_HW_PAGE_SHIFT
+-	int
+-	default 12
+-
+-config RISCV_USE_SW_PAGE
+-	bool
+-	depends on 64BIT
+-	depends on RISCV_HW_PAGE_SHIFT != PAGE_SHIFT
+-	default n
+-
+ config KASAN_SHADOW_OFFSET
+ 	hex
+ 	depends on KASAN_GENERIC
+@@ -885,28 +875,6 @@ config RISCV_BOOT_SPINWAIT
+ 
+ 	  If unsure what to do here, say N.
+ 
+-choice
+-	prompt "Page size"
+-	default RISCV_4K_PAGES
+-	help
+-	  Page size (translation granule) configuration.
+-
+-config RISCV_4K_PAGES
+-	bool "4KB"
+-	select HAVE_PAGE_SIZE_4KB
+-	help
+-	  This feature enables 4KB pages support.
+-
+-config RISCV_64K_PAGES
+-	bool "64KB"
+-	depends on RISCV_ISA_SVNAPOT && 64BIT
+-	select HAVE_PAGE_SIZE_64KB
+-	select RISCV_USE_SW_PAGE
+-	help
+-	  This feature enables 64KB pages support.
+-
+-endchoice
+-
+ config ARCH_SUPPORTS_KEXEC
+ 	def_bool y
+ 
+diff --git a/arch/riscv/Makefile b/arch/riscv/Makefile
+index 46970bc885ad..d469db9f46f4 100644
+--- a/arch/riscv/Makefile
++++ b/arch/riscv/Makefile
+@@ -66,9 +66,9 @@ endif
+ 
+ # ISA string setting
+ riscv-march-$(CONFIG_ARCH_RV32I)	:= rv32ima
+-riscv-march-$(CONFIG_ARCH_RV64I)	:= rv64ima_zicsr_zifencei
++riscv-march-$(CONFIG_ARCH_RV64I)	:= rv64ima
+ riscv-march-$(CONFIG_FPU)		:= $(riscv-march-y)fd
+-riscv-march-$(CONFIG_RISCV_ISA_C)	:= rv64ima_zicsr_zifencei
++riscv-march-$(CONFIG_RISCV_ISA_C)	:= $(riscv-march-y)c
+ riscv-march-$(CONFIG_RISCV_ISA_V)	:= $(riscv-march-y)v
+ 
+ ifneq ($(CONFIG_RISCV_ISA_C),y)
+diff --git a/arch/riscv/include/asm/fixmap.h b/arch/riscv/include/asm/fixmap.h
+index 17bf31334bd5..0a55099bb734 100644
+--- a/arch/riscv/include/asm/fixmap.h
++++ b/arch/riscv/include/asm/fixmap.h
+@@ -44,8 +44,7 @@ enum fixed_addresses {
+ 	 * before ioremap() is functional.
+ 	 */
+ #define NR_FIX_BTMAPS		(SZ_256K / PAGE_SIZE)
+-#define FIX_BTMAPS_SIZE		(FIXADDR_SIZE - ((FIX_BTMAP_END + 1) << PAGE_SHIFT))
+-#define FIX_BTMAPS_SLOTS	(FIX_BTMAPS_SIZE / SZ_256K)
++#define FIX_BTMAPS_SLOTS	7
+ #define TOTAL_FIX_BTMAPS	(NR_FIX_BTMAPS * FIX_BTMAPS_SLOTS)
+ 
+ 	FIX_BTMAP_END = __end_of_permanent_fixed_addresses,
+diff --git a/arch/riscv/include/asm/hugetlb.h b/arch/riscv/include/asm/hugetlb.h
+index eafd00f4b74f..faf3624d8057 100644
+--- a/arch/riscv/include/asm/hugetlb.h
++++ b/arch/riscv/include/asm/hugetlb.h
+@@ -51,11 +51,6 @@ pte_t arch_make_huge_pte(pte_t entry, unsigned int shift, vm_flags_t flags);
+ 
+ #endif /*CONFIG_RISCV_ISA_SVNAPOT*/
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-#define __HAVE_ARCH_MK_HUGE_PTE
+-pte_t mk_huge_pte(struct vm_area_struct *vma, struct page *page, pgprot_t pgprot);
+-#endif
+-
+ #include <asm-generic/hugetlb.h>
+ 
+ #endif /* _ASM_RISCV_HUGETLB_H */
+diff --git a/arch/riscv/include/asm/page.h b/arch/riscv/include/asm/page.h
+index 236b0106a1c9..32d308a3355f 100644
+--- a/arch/riscv/include/asm/page.h
++++ b/arch/riscv/include/asm/page.h
+@@ -12,10 +12,6 @@
+ #include <linux/pfn.h>
+ #include <linux/const.h>
+ 
+-#define HW_PAGE_SHIFT	CONFIG_RISCV_HW_PAGE_SHIFT
+-#define HW_PAGE_SIZE	(_AC(1, UL) << HW_PAGE_SHIFT)
+-#define HW_PAGE_MASK	(~(HW_PAGE_SIZE - 1))
+-
+ #define PAGE_SHIFT	CONFIG_PAGE_SHIFT
+ #define PAGE_SIZE	(_AC(1, UL) << PAGE_SHIFT)
+ #define PAGE_MASK	(~(PAGE_SIZE - 1))
+@@ -40,12 +36,8 @@
+  * By default, CONFIG_PAGE_OFFSET value corresponds to SV57 address space so
+  * define the PAGE_OFFSET value for SV48 and SV39.
+  */
+-#ifdef CONFIG_RISCV_64K_PAGES
+-#define PAGE_OFFSET_L4		_AC(0xffffa80000000000, UL)
+-#else
+ #define PAGE_OFFSET_L4		_AC(0xffffaf8000000000, UL)
+-#endif /* CONFIG_RISCV_64K_PAGES */
+-#define PAGE_OFFSET_L3		_AC(0xffffffd800000000, UL)
++#define PAGE_OFFSET_L3		_AC(0xffffffd600000000, UL)
+ #else
+ #define PAGE_OFFSET		_AC(CONFIG_PAGE_OFFSET, UL)
+ #endif /* CONFIG_64BIT */
+@@ -67,36 +59,6 @@ void clear_page(void *page);
+  * Use struct definitions to apply C type checking
+  */
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-
+-#define HW_PAGES_PER_PAGE	(1 << (PAGE_SHIFT - HW_PAGE_SHIFT))
+-
+-struct page_table_entry {
+-	union {
+-		unsigned long pgds[HW_PAGES_PER_PAGE];
+-		unsigned long p4ds[HW_PAGES_PER_PAGE];
+-		unsigned long puds[HW_PAGES_PER_PAGE];
+-		unsigned long pmds[HW_PAGES_PER_PAGE];
+-		unsigned long ptes[HW_PAGES_PER_PAGE];
+-	};
+-};
+-
+-/* Page Global Directory entry */
+-typedef struct page_table_entry pgd_t;
+-
+-/* Page Table entry */
+-typedef struct page_table_entry pte_t;
+-
+-#define pte_val(x)	((x).ptes[0])
+-#define pgd_val(x)	((x).pgds[0])
+-
+-pte_t __pte(unsigned long pteval);
+-pgd_t __pgd(unsigned long pgdval);
+-#define __pte		__pte
+-#define __pgd		__pgd
+-
+-#else /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ /* Page Global Directory entry */
+ typedef struct {
+ 	unsigned long pgd;
+@@ -107,21 +69,18 @@ typedef struct {
+ 	unsigned long pte;
+ } pte_t;
+ 
+-#define pte_val(x)	((x).pte)
+-#define pgd_val(x)	((x).pgd)
+-
+-#define __pte(x)	((pte_t) { (x) })
+-#define __pgd(x)	((pgd_t) { (x) })
+-
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ typedef struct {
+ 	unsigned long pgprot;
+ } pgprot_t;
+ 
+ typedef struct page *pgtable_t;
+ 
++#define pte_val(x)	((x).pte)
++#define pgd_val(x)	((x).pgd)
+ #define pgprot_val(x)	((x).pgprot)
++
++#define __pte(x)	((pte_t) { (x) })
++#define __pgd(x)	((pgd_t) { (x) })
+ #define __pgprot(x)	((pgprot_t) { (x) })
+ 
+ #ifdef CONFIG_64BIT
+@@ -226,9 +185,6 @@ extern phys_addr_t __phys_addr_symbol(unsigned long x);
+ #define __pa(x)		__virt_to_phys((unsigned long)(x))
+ #define __va(x)		((void *)__pa_to_va_nodebug((phys_addr_t)(x)))
+ 
+-#define pfn_to_hwpfn(pfn)	(pfn << (PAGE_SHIFT - HW_PAGE_SHIFT))
+-#define hwpfn_to_pfn(hwpfn)	(hwpfn >> (PAGE_SHIFT - HW_PAGE_SHIFT))
+-
+ #define phys_to_pfn(phys)	(PFN_DOWN(phys))
+ #define pfn_to_phys(pfn)	(PFN_PHYS(pfn))
+ 
+diff --git a/arch/riscv/include/asm/pgtable-32.h b/arch/riscv/include/asm/pgtable-32.h
+index e0c5c62f88d9..00f3369570a8 100644
+--- a/arch/riscv/include/asm/pgtable-32.h
++++ b/arch/riscv/include/asm/pgtable-32.h
+@@ -11,7 +11,7 @@
+ #include <linux/const.h>
+ 
+ /* Size of region mapped by a page global directory */
+-#define PGDIR_SHIFT     (10 + PAGE_SHIFT)
++#define PGDIR_SHIFT     22
+ #define PGDIR_SIZE      (_AC(1, UL) << PGDIR_SHIFT)
+ #define PGDIR_MASK      (~(PGDIR_SIZE - 1))
+ 
+@@ -20,10 +20,9 @@
+ /*
+  * rv32 PTE format:
+  * | XLEN-1  10 | 9             8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0
+- *     HW_PFN     reserved for SW   D   A   G   U   X   W   R   V
++ *       PFN      reserved for SW   D   A   G   U   X   W   R   V
+  */
+-#define _PAGE_HW_PFN_MASK	GENMASK(31, 10)
+-#define _PAGE_PFN_MASK		GENMASK(31, (10 + PAGE_SHIFT - HW_PAGE_SHIFT))
++#define _PAGE_PFN_MASK  GENMASK(31, 10)
+ 
+ #define _PAGE_NOCACHE		0
+ #define _PAGE_IO		0
+@@ -37,9 +36,4 @@
+ static const __maybe_unused int pgtable_l4_enabled;
+ static const __maybe_unused int pgtable_l5_enabled;
+ 
+-static inline int __pgd_present(unsigned long pgdval)
+-{
+-	return pgdval & _PAGE_PRESENT;
+-}
+-
+ #endif /* _ASM_RISCV_PGTABLE_32_H */
+diff --git a/arch/riscv/include/asm/pgtable-64.h b/arch/riscv/include/asm/pgtable-64.h
+index fbdaad9a98dd..0897dd99ab8d 100644
+--- a/arch/riscv/include/asm/pgtable-64.h
++++ b/arch/riscv/include/asm/pgtable-64.h
+@@ -13,9 +13,9 @@
+ extern bool pgtable_l4_enabled;
+ extern bool pgtable_l5_enabled;
+ 
+-#define PGDIR_SHIFT_L3  (9 + 9 + PAGE_SHIFT)
+-#define PGDIR_SHIFT_L4  (9 + PGDIR_SHIFT_L3)
+-#define PGDIR_SHIFT_L5  (9 + PGDIR_SHIFT_L4)
++#define PGDIR_SHIFT_L3  30
++#define PGDIR_SHIFT_L4  39
++#define PGDIR_SHIFT_L5  48
+ #define PGDIR_SHIFT     (pgtable_l5_enabled ? PGDIR_SHIFT_L5 : \
+ 		(pgtable_l4_enabled ? PGDIR_SHIFT_L4 : PGDIR_SHIFT_L3))
+ /* Size of region mapped by a page global directory */
+@@ -23,53 +23,24 @@ extern bool pgtable_l5_enabled;
+ #define PGDIR_MASK      (~(PGDIR_SIZE - 1))
+ 
+ /* p4d is folded into pgd in case of 4-level page table */
+-#define P4D_SHIFT_L3   (9 + 9 + PAGE_SHIFT)
+-#define P4D_SHIFT_L4   (9 + P4D_SHIFT_L3)
+-#define P4D_SHIFT_L5   (9 + P4D_SHIFT_L3)
++#define P4D_SHIFT_L3   30
++#define P4D_SHIFT_L4   39
++#define P4D_SHIFT_L5   39
+ #define P4D_SHIFT      (pgtable_l5_enabled ? P4D_SHIFT_L5 : \
+ 		(pgtable_l4_enabled ? P4D_SHIFT_L4 : P4D_SHIFT_L3))
+ #define P4D_SIZE       (_AC(1, UL) << P4D_SHIFT)
+ #define P4D_MASK       (~(P4D_SIZE - 1))
+ 
+ /* pud is folded into pgd in case of 3-level page table */
+-#define PUD_SHIFT      (9 + 9 + PAGE_SHIFT)
++#define PUD_SHIFT      30
+ #define PUD_SIZE       (_AC(1, UL) << PUD_SHIFT)
+ #define PUD_MASK       (~(PUD_SIZE - 1))
+ 
+-#define PMD_SHIFT       (9 + PAGE_SHIFT)
++#define PMD_SHIFT       21
+ /* Size of region mapped by a page middle directory */
+ #define PMD_SIZE        (_AC(1, UL) << PMD_SHIFT)
+ #define PMD_MASK        (~(PMD_SIZE - 1))
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-
+-/* Page 4th Directory entry */
+-typedef struct page_table_entry p4d_t;
+-
+-#define p4d_val(x)	((x).p4ds[0])
+-p4d_t __p4d(unsigned long p4dval);
+-#define __p4d		__p4d
+-#define PTRS_PER_P4D	(PAGE_SIZE / sizeof(p4d_t))
+-
+-/* Page Upper Directory entry */
+-typedef struct page_table_entry pud_t;
+-
+-#define pud_val(x)      ((x).puds[0])
+-pud_t __pud(unsigned long pudval);
+-#define __pud		__pud
+-#define PTRS_PER_PUD    (PAGE_SIZE / sizeof(pud_t))
+-
+-/* Page Middle Directory entry */
+-typedef struct page_table_entry pmd_t;
+-
+-#define pmd_val(x)      ((x).pmds[0])
+-pmd_t __pmd(unsigned long pmdval);
+-#define __pmd		__pmd
+-
+-#define PTRS_PER_PMD    (PAGE_SIZE / sizeof(pmd_t))
+-
+-#else /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ /* Page 4th Directory entry */
+ typedef struct {
+ 	unsigned long p4d;
+@@ -98,15 +69,12 @@ typedef struct {
+ 
+ #define PTRS_PER_PMD    (PAGE_SIZE / sizeof(pmd_t))
+ 
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ /*
+  * rv64 PTE format:
+  * | 63 | 62 61 | 60 54 | 53  10 | 9             8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0
+- *   N      MT     RSV    HW_PFN   reserved for SW   D   A   G   U   X   W   R   V
++ *   N      MT     RSV    PFN      reserved for SW   D   A   G   U   X   W   R   V
+  */
+-#define _PAGE_HW_PFN_MASK	GENMASK(53, 10)
+-#define _PAGE_PFN_MASK		GENMASK(53, (10 + PAGE_SHIFT - HW_PAGE_SHIFT))
++#define _PAGE_PFN_MASK  GENMASK(53, 10)
+ 
+ /*
+  * [63] Svnapot definitions:
+@@ -124,23 +92,12 @@ enum napot_cont_order {
+ 	NAPOT_ORDER_MAX,
+ };
+ 
+-#define NAPOT_PAGE_ORDER_BASE							\
+-	((NAPOT_CONT_ORDER_BASE >= (PAGE_SHIFT - HW_PAGE_SHIFT)) ?		\
+-	 (NAPOT_CONT_ORDER_BASE - (PAGE_SHIFT - HW_PAGE_SHIFT)) : 1)
+-#define NAPOT_PAGE_ORDER_MAX							\
+-	((NAPOT_ORDER_MAX > (PAGE_SHIFT - HW_PAGE_SHIFT)) ?			\
+-	 (NAPOT_ORDER_MAX - (PAGE_SHIFT - HW_PAGE_SHIFT)) :			\
+-	 NAPOT_PAGE_ORDER_BASE)
+-
+ #define for_each_napot_order(order)						\
+-	for (order = NAPOT_PAGE_ORDER_BASE;					\
+-		order < NAPOT_PAGE_ORDER_MAX; order++)
++	for (order = NAPOT_CONT_ORDER_BASE; order < NAPOT_ORDER_MAX; order++)
+ #define for_each_napot_order_rev(order)						\
+-	for (order = NAPOT_PAGE_ORDER_MAX - 1;					\
+-		order >= NAPOT_PAGE_ORDER_BASE; order--)
+-#define napot_cont_order(val)							\
+-	(__builtin_ctzl((pte_val(val) >> _PAGE_HWPFN_SHIFT) << 1) -		\
+-		(PAGE_SHIFT - HW_PAGE_SHIFT))
++	for (order = NAPOT_ORDER_MAX - 1;					\
++	     order >= NAPOT_CONT_ORDER_BASE; order--)
++#define napot_cont_order(val)	(__builtin_ctzl((val.pte >> _PAGE_PFN_SHIFT) << 1))
+ 
+ #define napot_cont_shift(order)	((order) + PAGE_SHIFT)
+ #define napot_cont_size(order)	BIT(napot_cont_shift(order))
+@@ -148,7 +105,7 @@ enum napot_cont_order {
+ #define napot_pte_num(order)	BIT(order)
+ 
+ #ifdef CONFIG_RISCV_ISA_SVNAPOT
+-#define HUGE_MAX_HSTATE		(2 + (NAPOT_ORDER_MAX - NAPOT_PAGE_ORDER_BASE))
++#define HUGE_MAX_HSTATE		(2 + (NAPOT_ORDER_MAX - NAPOT_CONT_ORDER_BASE))
+ #else
+ #define HUGE_MAX_HSTATE		2
+ #endif
+@@ -215,14 +172,9 @@ static inline u64 riscv_page_io(void)
+ 					  _PAGE_USER | _PAGE_GLOBAL |	\
+ 					  _PAGE_MTMASK))
+ 
+-static inline int __pud_present(unsigned long pudval)
+-{
+-	return pudval & _PAGE_PRESENT;
+-}
+-
+ static inline int pud_present(pud_t pud)
+ {
+-	return __pud_present(pud_val(pud));
++	return (pud_val(pud) & _PAGE_PRESENT);
+ }
+ 
+ static inline int pud_none(pud_t pud)
+@@ -235,16 +187,11 @@ static inline int pud_bad(pud_t pud)
+ 	return !pud_present(pud);
+ }
+ 
+-static inline bool __pud_leaf(unsigned long pudval)
+-{
+-	return __pud_present(pudval) && (pudval & _PAGE_LEAF);
+-}
+-
++#define pud_leaf	pud_leaf
+ static inline bool pud_leaf(pud_t pud)
+ {
+-	return __pud_leaf(pud_val(pud));
++	return pud_present(pud) && (pud_val(pud) & _PAGE_LEAF);
+ }
+-#define pud_leaf	pud_leaf
+ 
+ static inline int pud_user(pud_t pud)
+ {
+@@ -253,7 +200,7 @@ static inline int pud_user(pud_t pud)
+ 
+ static inline void set_pud(pud_t *pudp, pud_t pud)
+ {
+-	*pudp = pud;
++	WRITE_ONCE(*pudp, pud);
+ }
+ 
+ static inline void pud_clear(pud_t *pudp)
+@@ -329,9 +276,9 @@ static inline unsigned long _pmd_pfn(pmd_t pmd)
+ static inline void set_p4d(p4d_t *p4dp, p4d_t p4d)
+ {
+ 	if (pgtable_l4_enabled)
+-		*p4dp = p4d;
++		WRITE_ONCE(*p4dp, p4d);
+ 	else
+-		set_pud((pud_t *)p4dp, __pud(p4d_val(p4d)));
++		set_pud((pud_t *)p4dp, (pud_t){ p4d_val(p4d) });
+ }
+ 
+ static inline int p4d_none(p4d_t p4d)
+@@ -342,30 +289,14 @@ static inline int p4d_none(p4d_t p4d)
+ 	return 0;
+ }
+ 
+-static inline int __p4d_present(unsigned long p4dval)
+-{
+-	return p4dval & _PAGE_PRESENT;
+-}
+-
+ static inline int p4d_present(p4d_t p4d)
+ {
+ 	if (pgtable_l4_enabled)
+-		return __p4d_present(p4d_val(p4d));
++		return (p4d_val(p4d) & _PAGE_PRESENT);
+ 
+ 	return 1;
+ }
+ 
+-static inline int __p4d_leaf(unsigned long p4dval)
+-{
+-	return 0;
+-}
+-
+-static inline int p4d_leaf(p4d_t p4d)
+-{
+-	return __p4d_leaf(p4d_val(p4d));
+-}
+-#define p4d_leaf	p4d_leaf
+-
+ static inline int p4d_bad(p4d_t p4d)
+ {
+ 	if (pgtable_l4_enabled)
+@@ -395,7 +326,7 @@ static inline pud_t *p4d_pgtable(p4d_t p4d)
+ 	if (pgtable_l4_enabled)
+ 		return (pud_t *)pfn_to_virt(__page_val_to_pfn(p4d_val(p4d)));
+ 
+-	return (pud_t *)pud_pgtable(__pud(p4d_val(p4d)));
++	return (pud_t *)pud_pgtable((pud_t) { p4d_val(p4d) });
+ }
+ #define p4d_page_vaddr(p4d)	((unsigned long)p4d_pgtable(p4d))
+ 
+@@ -412,9 +343,9 @@ pud_t *pud_offset(p4d_t *p4d, unsigned long address);
+ static inline void set_pgd(pgd_t *pgdp, pgd_t pgd)
+ {
+ 	if (pgtable_l5_enabled)
+-		*pgdp = pgd;
++		WRITE_ONCE(*pgdp, pgd);
+ 	else
+-		set_p4d((p4d_t *)pgdp, __p4d(pgd_val(pgd)));
++		set_p4d((p4d_t *)pgdp, (p4d_t){ pgd_val(pgd) });
+ }
+ 
+ static inline int pgd_none(pgd_t pgd)
+@@ -425,15 +356,10 @@ static inline int pgd_none(pgd_t pgd)
+ 	return 0;
+ }
+ 
+-static inline int __pgd_present(unsigned long pgdval)
+-{
+-	return pgdval & _PAGE_PRESENT;
+-}
+-
+ static inline int pgd_present(pgd_t pgd)
+ {
+ 	if (pgtable_l5_enabled)
+-		return __pgd_present(pgd_val(pgd));
++		return (pgd_val(pgd) & _PAGE_PRESENT);
+ 
+ 	return 1;
+ }
+@@ -457,7 +383,7 @@ static inline p4d_t *pgd_pgtable(pgd_t pgd)
+ 	if (pgtable_l5_enabled)
+ 		return (p4d_t *)pfn_to_virt(__page_val_to_pfn(pgd_val(pgd)));
+ 
+-	return (p4d_t *)p4d_pgtable(__p4d(pgd_val(pgd)));
++	return (p4d_t *)p4d_pgtable((p4d_t) { pgd_val(pgd) });
+ }
+ #define pgd_page_vaddr(pgd)	((unsigned long)pgd_pgtable(pgd))
+ 
+diff --git a/arch/riscv/include/asm/pgtable-bits.h b/arch/riscv/include/asm/pgtable-bits.h
+index e5bb6a805505..a8f5205cea54 100644
+--- a/arch/riscv/include/asm/pgtable-bits.h
++++ b/arch/riscv/include/asm/pgtable-bits.h
+@@ -31,8 +31,7 @@
+ /* Used for swap PTEs only. */
+ #define _PAGE_SWP_EXCLUSIVE _PAGE_ACCESSED
+ 
+-#define _PAGE_HWPFN_SHIFT	10
+-#define _PAGE_PFN_SHIFT		(_PAGE_HWPFN_SHIFT + (PAGE_SHIFT - HW_PAGE_SHIFT))
++#define _PAGE_PFN_SHIFT 10
+ 
+ /*
+  * when all of R/W/X are zero, the PTE is a pointer to the next level
+diff --git a/arch/riscv/include/asm/pgtable.h b/arch/riscv/include/asm/pgtable.h
+index fbc397c4e1c8..e79f15293492 100644
+--- a/arch/riscv/include/asm/pgtable.h
++++ b/arch/riscv/include/asm/pgtable.h
+@@ -30,27 +30,12 @@
+ /* Number of entries in the page table */
+ #define PTRS_PER_PTE    (PAGE_SIZE / sizeof(pte_t))
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-
+-/*
+- * PGDIR_SHIFT grows as PAGE_SIZE grows. To avoid va exceeds limitation, pgd
+- * index bits should be cut. Thus we use HW_PAGE_SIZE instead.
+- */
+-#define __PTRS_PER_PGD	(HW_PAGE_SIZE / sizeof(pgd_t))
+-#define pgd_index(a)	(((a) >> PGDIR_SHIFT) & (__PTRS_PER_PGD - 1))
+-
+-#define KERN_VIRT_SIZE          ((__PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2)
+-
+-#else
+-
+ /*
+  * Half of the kernel address space (1/4 of the entries of the page global
+  * directory) is for the direct mapping.
+  */
+ #define KERN_VIRT_SIZE          ((PTRS_PER_PGD / 2 * PGDIR_SIZE) / 2)
+ 
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ #define VMALLOC_SIZE     (KERN_VIRT_SIZE >> 1)
+ #define VMALLOC_END      PAGE_OFFSET
+ #define VMALLOC_START    (PAGE_OFFSET - VMALLOC_SIZE)
+@@ -108,10 +93,10 @@
+ #define PCI_IO_END       VMEMMAP_START
+ #define PCI_IO_START     (PCI_IO_END - PCI_IO_SIZE)
+ 
+-#define FIXADDR_TOP	 (PCI_IO_START & PMD_MASK)
++#define FIXADDR_TOP      PCI_IO_START
+ #ifdef CONFIG_64BIT
+ #define MAX_FDT_SIZE	 PMD_SIZE
+-#define FIX_FDT_SIZE	 (MAX_FDT_SIZE + PMD_SIZE)
++#define FIX_FDT_SIZE	 (MAX_FDT_SIZE + SZ_2M)
+ #define FIXADDR_SIZE     (PMD_SIZE + FIX_FDT_SIZE)
+ #else
+ #define MAX_FDT_SIZE	 PGDIR_SIZE
+@@ -129,8 +114,7 @@
+ #include <linux/mm_types.h>
+ #include <asm/compat.h>
+ 
+-#define __page_val_to_hwpfn(_val)  (((_val) & _PAGE_HW_PFN_MASK) >> _PAGE_HWPFN_SHIFT)
+-static inline unsigned long __page_val_to_pfn(unsigned long val);
++#define __page_val_to_pfn(_val)  (((_val) & _PAGE_PFN_MASK) >> _PAGE_PFN_SHIFT)
+ 
+ #ifdef CONFIG_64BIT
+ #include <asm/pgtable-64.h>
+@@ -147,18 +131,6 @@ static inline unsigned long __page_val_to_pfn(unsigned long val);
+ #include <asm/pgtable-32.h>
+ #endif /* CONFIG_64BIT */
+ 
+-#define __PMD_SHIFT	(PMD_SHIFT - (PAGE_SHIFT - HW_PAGE_SHIFT))
+-#define __PMD_SIZE	(_AC(1, UL) << __PMD_SHIFT)
+-
+-#define __PUD_SHIFT	(PUD_SHIFT - (PAGE_SHIFT - HW_PAGE_SHIFT))
+-#define __PUD_SIZE	(_AC(1, UL) << __PUD_SHIFT)
+-
+-#define __P4D_SHIFT	(P4D_SHIFT - (PAGE_SHIFT - HW_PAGE_SHIFT))
+-#define __P4D_SIZE	(_AC(1, UL) << __P4D_SHIFT)
+-
+-#define __PGD_SHIFT	(PGD_SHIFT - (PAGE_SHIFT - HW_PAGE_SHIFT))
+-#define __PGD_SIZE	(_AC(1, UL) << __PGD_SHIFT)
+-
+ #include <linux/page_table_check.h>
+ 
+ #ifdef CONFIG_XIP_KERNEL
+@@ -233,45 +205,8 @@ extern pgd_t swapper_pg_dir[];
+ extern pgd_t trampoline_pg_dir[];
+ extern pgd_t early_pg_dir[];
+ 
+-static inline unsigned long make_satp(unsigned long pfn,
+-		unsigned long asid, unsigned long satp_mode)
+-{
+-	return (pfn_to_hwpfn(pfn) |
+-		((asid & SATP_ASID_MASK) << SATP_ASID_SHIFT) | satp_mode);
+-}
+-
+-static inline unsigned long satp_pfn(unsigned long satp)
+-{
+-	unsigned long hwpfn = satp & SATP_PPN;
+-
+-	return hwpfn_to_pfn(hwpfn);
+-}
+-
+-static inline unsigned long __pte_pgprot(unsigned long pteval)
+-{
+-	unsigned long prot_mask = GENMASK(_PAGE_HWPFN_SHIFT - 1, 0);
+-
+-	return pteval & prot_mask;
+-}
+-
+-static inline pgprot_t pte_pgprot(pte_t pte)
+-{
+-	return __pgprot(__pte_pgprot(pte_val(pte)));
+-}
+-
+-static inline int __pgd_leaf(unsigned long pgdval)
+-{
+-	return __pgd_present(pgdval) && (pgdval & _PAGE_LEAF);
+-}
+-
+-static inline int pgd_leaf(pgd_t pgd)
+-{
+-	return __pgd_leaf(pgd_val(pgd));
+-}
+-#define pgd_leaf	pgd_leaf
+-
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+-static inline int __pmd_present(unsigned long pmdval)
++static inline int pmd_present(pmd_t pmd)
+ {
+ 	/*
+ 	 * Checking for _PAGE_LEAF is needed too because:
+@@ -279,19 +214,14 @@ static inline int __pmd_present(unsigned long pmdval)
+ 	 * the present bit, in this situation, pmd_present() and
+ 	 * pmd_trans_huge() still needs to return true.
+ 	 */
+-	return (pmdval & (_PAGE_PRESENT | _PAGE_PROT_NONE | _PAGE_LEAF));
++	return (pmd_val(pmd) & (_PAGE_PRESENT | _PAGE_PROT_NONE | _PAGE_LEAF));
+ }
+ #else
+-static inline int __pmd_present(unsigned long pmdval)
+-{
+-	return (pmdval & (_PAGE_PRESENT | _PAGE_PROT_NONE));
+-}
+-#endif
+-
+ static inline int pmd_present(pmd_t pmd)
+ {
+-	return __pmd_present(pmd_val(pmd));
++	return (pmd_val(pmd) & (_PAGE_PRESENT | _PAGE_PROT_NONE));
+ }
++#endif
+ 
+ static inline int pmd_none(pmd_t pmd)
+ {
+@@ -303,20 +233,15 @@ static inline int pmd_bad(pmd_t pmd)
+ 	return !pmd_present(pmd) || (pmd_val(pmd) & _PAGE_LEAF);
+ }
+ 
+-static inline bool __pmd_leaf(unsigned long pmdval)
+-{
+-	return __pmd_present(pmdval) && (pmdval & _PAGE_LEAF);
+-}
+-
++#define pmd_leaf	pmd_leaf
+ static inline bool pmd_leaf(pmd_t pmd)
+ {
+-	return __pmd_leaf(pmd_val(pmd));
++	return pmd_present(pmd) && (pmd_val(pmd) & _PAGE_LEAF);
+ }
+-#define pmd_leaf	pmd_leaf
+ 
+ static inline void set_pmd(pmd_t *pmdp, pmd_t pmd)
+ {
+-	*pmdp = pmd;
++	WRITE_ONCE(*pmdp, pmd);
+ }
+ 
+ static inline void pmd_clear(pmd_t *pmdp)
+@@ -348,70 +273,6 @@ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
+ 	return (unsigned long)pfn_to_virt(__page_val_to_pfn(pmd_val(pmd)));
+ }
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-
+-static inline pte_t pmd_pte(pmd_t pmd)
+-{
+-	return (pte_t)pmd;
+-}
+-
+-static inline pte_t pud_pte(pud_t pud)
+-{
+-	return (pte_t)pud;
+-}
+-
+-static inline pte_t p4d_pte(p4d_t p4d)
+-{
+-	return (pte_t)p4d;
+-}
+-
+-static inline pte_t pgd_pte(pgd_t pgd)
+-{
+-	return (pte_t)pgd;
+-}
+-
+-static inline pmd_t pte_pmd(pte_t pte)
+-{
+-	return (pmd_t)pte;
+-}
+-
+-static inline pud_t pte_pud(pte_t pte)
+-{
+-	return (pud_t)pte;
+-}
+-
+-static inline p4d_t pte_p4d(pte_t pte)
+-{
+-	return (p4d_t)pte;
+-}
+-
+-static inline pgd_t pte_pgd(pte_t pte)
+-{
+-	return (pgd_t)pte;
+-}
+-
+-static inline pte_t pte_set_flag(pte_t pte, unsigned long flag)
+-{
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++)
+-		pte.ptes[i] |= flag;
+-
+-	return pte;
+-}
+-
+-static inline pte_t pte_clear_flag(pte_t pte, unsigned long flag)
+-{
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++)
+-		pte.ptes[i] &= (~flag);
+-
+-	return pte;
+-}
+-
+-#else /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ static inline pte_t pmd_pte(pmd_t pmd)
+ {
+ 	return __pte(pmd_val(pmd));
+@@ -422,48 +283,6 @@ static inline pte_t pud_pte(pud_t pud)
+ 	return __pte(pud_val(pud));
+ }
+ 
+-static inline pte_t p4d_pte(p4d_t p4d)
+-{
+-	return __pte(p4d_val(p4d));
+-}
+-
+-static inline pte_t pgd_pte(pgd_t pgd)
+-{
+-	return __pte(pgd_val(pgd));
+-}
+-
+-static inline pmd_t pte_pmd(pte_t pte)
+-{
+-	return __pmd(pte_val(pte));
+-}
+-
+-static inline pud_t pte_pud(pte_t pte)
+-{
+-	return __pud(pte_val(pte));
+-}
+-
+-static inline p4d_t pte_p4d(pte_t pte)
+-{
+-	return __p4d(pte_val(pte));
+-}
+-
+-static inline pgd_t pte_pgd(pte_t pte)
+-{
+-	return __pgd(pte_val(pte));
+-}
+-
+-static inline pte_t pte_set_flag(pte_t pte, unsigned long flag)
+-{
+-	return __pte(pte_val(pte) | flag);
+-}
+-
+-static inline pte_t pte_clear_flag(pte_t pte, unsigned long flag)
+-{
+-	return __pte(pte_val(pte) & (~flag));
+-}
+-
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ #ifdef CONFIG_RISCV_ISA_SVNAPOT
+ #include <asm/cpufeature.h>
+ 
+@@ -472,96 +291,40 @@ static __always_inline bool has_svnapot(void)
+ 	return riscv_has_extension_likely(RISCV_ISA_EXT_SVNAPOT);
+ }
+ 
+-static inline unsigned long __pte_napot(unsigned long val)
+-{
+-	return val & _PAGE_NAPOT;
+-}
+-
+ static inline unsigned long pte_napot(pte_t pte)
+ {
+-	return __pte_napot(pte_val(pte));
++	return pte_val(pte) & _PAGE_NAPOT;
+ }
+ 
+-static inline unsigned long __pte_mknapot(unsigned long pteval,
+-					  unsigned int order)
++static inline pte_t pte_mknapot(pte_t pte, unsigned int order)
+ {
+ 	int pos = order - 1 + _PAGE_PFN_SHIFT;
+ 	unsigned long napot_bit = BIT(pos);
+-	unsigned long napot_mask = ~GENMASK(pos, _PAGE_HWPFN_SHIFT);
+-
+-	BUG_ON(__pte_napot(pteval));
+-	pteval = (pteval & napot_mask) | napot_bit | _PAGE_NAPOT;
+-
+-	return pteval;
+-}
+-
+-static inline unsigned long __pte_denapot(unsigned long pteval)
+-{
+-	unsigned long prot_mask = ~(_PAGE_HW_PFN_MASK | _PAGE_NAPOT);
+-	unsigned long res;
+-
+-	if (!__pte_napot(pteval))
+-		return pteval;
+-	res = __page_val_to_hwpfn(pteval);
+-	res = res & (res - 1UL);
+-	pteval = (res << _PAGE_HWPFN_SHIFT) | (pteval & prot_mask);
++	unsigned long napot_mask = ~GENMASK(pos, _PAGE_PFN_SHIFT);
+ 
+-	return pteval;
++	return __pte((pte_val(pte) & napot_mask) | napot_bit | _PAGE_NAPOT);
+ }
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-static inline pte_t pte_mknapot(pte_t pte, unsigned int order)
+-{
+-	unsigned long pteval = pte_val(pte);
+-	unsigned int i;
+-
+-	pteval = __pte_denapot(pteval);
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++)
+-		pte.ptes[i] = pteval;
+-
+-	return pte;
+-}
+-#else
+-static inline pte_t pte_mknapot(pte_t pte, unsigned int order)
+-{
+-	unsigned long pteval = pte_val(pte);
+-
+-	pte_val(pte) = __pte_mknapot(pteval, order);
+-
+-	return pte;
+-}
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ #else
+ 
+ static __always_inline bool has_svnapot(void) { return false; }
+ 
+-static inline unsigned long __pte_napot(unsigned long pteval)
+-{
+-	return 0;
+-}
+-
+ static inline unsigned long pte_napot(pte_t pte)
+ {
+-	return __pte_napot(pte_val(pte));
++	return 0;
+ }
+ 
+ #endif /* CONFIG_RISCV_ISA_SVNAPOT */
+ 
+-static inline unsigned long __page_val_to_pfn(unsigned long pteval)
++/* Yields the page frame number (PFN) of a page table entry */
++static inline unsigned long pte_pfn(pte_t pte)
+ {
+-	unsigned long res = __page_val_to_hwpfn(pteval);
++	unsigned long res  = __page_val_to_pfn(pte_val(pte));
+ 
+-	if (has_svnapot() && __pte_napot(pteval))
++	if (has_svnapot() && pte_napot(pte))
+ 		res = res & (res - 1UL);
+ 
+-	return hwpfn_to_pfn(res);
+-}
+-
+-/* Yields the page frame number (PFN) of a page table entry */
+-static inline unsigned long pte_pfn(pte_t pte)
+-{
+-	return __page_val_to_pfn(pte_val(pte));
++	return res;
+ }
+ 
+ #define pte_page(x)     pfn_to_page(pte_pfn(x))
+@@ -578,14 +341,9 @@ static inline pte_t pfn_pte(unsigned long pfn, pgprot_t prot)
+ 
+ #define mk_pte(page, prot)       pfn_pte(page_to_pfn(page), prot)
+ 
+-static inline int __pte_present(unsigned long pteval)
+-{
+-	return (pteval & (_PAGE_PRESENT | _PAGE_PROT_NONE));
+-}
+-
+ static inline int pte_present(pte_t pte)
+ {
+-	return __pte_present(pte_val(pte));
++	return (pte_val(pte) & (_PAGE_PRESENT | _PAGE_PROT_NONE));
+ }
+ 
+ #define pte_accessible pte_accessible
+@@ -626,29 +384,6 @@ static inline int pte_huge(pte_t pte)
+ 	return pte_present(pte) && (pte_val(pte) & _PAGE_LEAF);
+ }
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-static inline int pte_dirty(pte_t pte)
+-{
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++)
+-		if (pte.ptes[i] & _PAGE_DIRTY)
+-			return 1;
+-
+-	return 0;
+-}
+-
+-static inline int pte_young(pte_t pte)
+-{
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++)
+-		if (pte.ptes[i] & _PAGE_ACCESSED)
+-			return 1;
+-
+-	return 0;
+-}
+-#else
+ static inline int pte_dirty(pte_t pte)
+ {
+ 	return pte_val(pte) & _PAGE_DIRTY;
+@@ -658,7 +393,6 @@ static inline int pte_young(pte_t pte)
+ {
+ 	return pte_val(pte) & _PAGE_ACCESSED;
+ }
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+ 
+ static inline int pte_special(pte_t pte)
+ {
+@@ -676,46 +410,46 @@ static inline int pte_devmap(pte_t pte)
+ 
+ static inline pte_t pte_wrprotect(pte_t pte)
+ {
+-	return pte_clear_flag(pte, _PAGE_WRITE);
++	return __pte(pte_val(pte) & ~(_PAGE_WRITE));
+ }
+ 
+ /* static inline pte_t pte_mkread(pte_t pte) */
+ 
+ static inline pte_t pte_mkwrite_novma(pte_t pte)
+ {
+-	return pte_set_flag(pte, _PAGE_WRITE);
++	return __pte(pte_val(pte) | _PAGE_WRITE);
+ }
+ 
+ /* static inline pte_t pte_mkexec(pte_t pte) */
+ 
+ static inline pte_t pte_mkdirty(pte_t pte)
+ {
+-	return pte_set_flag(pte, _PAGE_DIRTY);
++	return __pte(pte_val(pte) | _PAGE_DIRTY);
+ }
+ 
+ static inline pte_t pte_mkclean(pte_t pte)
+ {
+-	return pte_clear_flag(pte, _PAGE_DIRTY);
++	return __pte(pte_val(pte) & ~(_PAGE_DIRTY));
+ }
+ 
+ static inline pte_t pte_mkyoung(pte_t pte)
+ {
+-	return pte_set_flag(pte, _PAGE_ACCESSED);
++	return __pte(pte_val(pte) | _PAGE_ACCESSED);
+ }
+ 
+ static inline pte_t pte_mkold(pte_t pte)
+ {
+-	return pte_clear_flag(pte, _PAGE_ACCESSED);
++	return __pte(pte_val(pte) & ~(_PAGE_ACCESSED));
+ }
+ 
+ static inline pte_t pte_mkspecial(pte_t pte)
+ {
+-	return pte_set_flag(pte, _PAGE_SPECIAL);
++	return __pte(pte_val(pte) | _PAGE_SPECIAL);
+ }
+ 
+ static inline pte_t pte_mkdevmap(pte_t pte)
+ {
+-	return pte_set_flag(pte, _PAGE_DEVMAP);
++	return __pte(pte_val(pte) | _PAGE_DEVMAP);
+ }
+ 
+ static inline pte_t pte_mkhuge(pte_t pte)
+@@ -751,7 +485,7 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
+ 
+ 	ALT_THEAD_PMA(newprot_val);
+ 
+-	return pte_set_flag(pte_clear_flag(pte, ~_PAGE_CHG_MASK), newprot_val);
++	return __pte((pte_val(pte) & _PAGE_CHG_MASK) | newprot_val);
+ }
+ 
+ #define pgd_ERROR(e) \
+@@ -774,7 +508,7 @@ static inline void update_mmu_cache_range(struct vm_fault *vmf,
+ 	 * the extra traps reduce performance.  So, eagerly SFENCE.VMA.
+ 	 */
+ 	while (nr--)
+-		local_flush_tlb_page(address + nr * PAGE_SIZE, PAGE_SIZE);
++		local_flush_tlb_page(address + nr * PAGE_SIZE);
+ 
+ svvptc:;
+ 	/*
+@@ -792,12 +526,9 @@ svvptc:;
+ static inline void update_mmu_cache_pmd(struct vm_area_struct *vma,
+ 		unsigned long address, pmd_t *pmdp)
+ {
+-	asm goto(ALTERNATIVE("nop", "j %l[svvptc]", 0, RISCV_ISA_EXT_SVVPTC, 1)
+-		 : : : : svvptc);
++	pte_t *ptep = (pte_t *)pmdp;
+ 
+-	local_flush_tlb_page(address, PMD_SIZE);
+-
+-svvptc:;
++	update_mmu_cache(vma, address, ptep);
+ }
+ 
+ #define __HAVE_ARCH_PTE_SAME
+@@ -813,182 +544,8 @@ static inline int pte_same(pte_t pte_a, pte_t pte_b)
+  */
+ static inline void set_pte(pte_t *ptep, pte_t pteval)
+ {
+-	*ptep = pteval;
+-}
+-
+-static inline pte_t ptep_get(pte_t *ptep)
+-{
+-	return *ptep;
+-}
+-#define ptep_get	ptep_get
+-
+-static inline pmd_t pmdp_get(pmd_t *pmdp)
+-{
+-	return *pmdp;
+-}
+-#define pmdp_get	pmdp_get
+-
+-static inline pud_t pudp_get(pud_t *pudp)
+-{
+-	return *pudp;
+-}
+-#define pudp_get	pudp_get
+-
+-static inline p4d_t p4dp_get(p4d_t *p4dp)
+-{
+-	return *p4dp;
+-}
+-#define p4dp_get	p4dp_get
+-
+-static inline pgd_t pgdp_get(pgd_t *pgdp)
+-{
+-	return *pgdp;
+-}
+-#define pgdp_get	pgdp_get
+-
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-static inline pte_t ptep_get_lockless(pte_t *ptep)
+-{
+-	unsigned long pteval;
+-	pte_t pte;
+-	int i;
+-
+-retry:
+-	pteval = READ_ONCE(ptep->ptes[0]);
+-	pte = *ptep;
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		if (__page_val_to_pfn(pteval) !=
+-		    __page_val_to_pfn(pte.ptes[i]))
+-			goto retry;
+-		if ((__pte_pgprot(pteval) | _PAGE_DIRTY | _PAGE_ACCESSED) !=
+-		    (__pte_pgprot(pte.ptes[i]) | _PAGE_DIRTY | _PAGE_ACCESSED))
+-			goto retry;
+-
+-		if (__pte_present(pteval) && !__pte_napot(pteval))
+-			pteval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pte;
+-}
+-#define ptep_get_lockless	ptep_get_lockless
+-
+-static inline pmd_t pmdp_get_lockless(pmd_t *pmdp)
+-{
+-	unsigned long pmdval;
+-	pmd_t pmd;
+-	int i;
+-
+-retry:
+-	pmdval = READ_ONCE(pmdp->pmds[0]);
+-	pmd = *pmdp;
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		if (__page_val_to_pfn(pmdval) !=
+-		    __page_val_to_pfn(pmd.pmds[i]))
+-			goto retry;
+-		if ((__pte_pgprot(pmdval) | _PAGE_DIRTY | _PAGE_ACCESSED) !=
+-		    (__pte_pgprot(pmd.pmds[i]) | _PAGE_DIRTY | _PAGE_ACCESSED))
+-			goto retry;
+-
+-		if (__pmd_leaf(pmdval))
+-			pmdval += (1 << (PMD_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__pmd_present(pmdval))
+-			pmdval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pmd;
+-}
+-#define pmdp_get_lockless	pmdp_get_lockless
+-
+-static inline void pmdp_get_lockless_sync(void)
+-{
+-}
+-
+-static inline pud_t pudp_get_lockless(pud_t *pudp)
+-{
+-	unsigned long pudval;
+-	pud_t pud;
+-	int i;
+-
+-retry:
+-	pudval = READ_ONCE(pudp->puds[0]);
+-	pud = *pudp;
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		if (__page_val_to_pfn(pudval) !=
+-		    __page_val_to_pfn(pud.puds[i]))
+-			goto retry;
+-		if ((__pte_pgprot(pudval) | _PAGE_DIRTY | _PAGE_ACCESSED) !=
+-		    (__pte_pgprot(pud.puds[i]) | _PAGE_DIRTY | _PAGE_ACCESSED))
+-			goto retry;
+-
+-		if (__pud_leaf(pudval))
+-			pudval += (1 << (PUD_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__pud_present(pudval))
+-			pudval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pud;
+-}
+-#define pudp_get_lockless	pudp_get_lockless
+-
+-static inline p4d_t p4dp_get_lockless(p4d_t *p4dp)
+-{
+-	unsigned long p4dval;
+-	p4d_t p4d;
+-	int i;
+-
+-retry:
+-	p4dval = READ_ONCE(p4dp->p4ds[0]);
+-	p4d = *p4dp;
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		if (__page_val_to_pfn(p4dval) !=
+-		    __page_val_to_pfn(p4d.p4ds[i]))
+-			goto retry;
+-		if ((__pte_pgprot(p4dval) | _PAGE_DIRTY | _PAGE_ACCESSED) !=
+-		    (__pte_pgprot(p4d.p4ds[i]) | _PAGE_DIRTY | _PAGE_ACCESSED))
+-			goto retry;
+-
+-		if (__p4d_leaf(p4dval))
+-			p4dval += (1 << (P4D_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__p4d_present(p4dval))
+-			p4dval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return p4d;
+-}
+-#define p4dp_get_lockless	p4dp_get_lockless
+-
+-static inline pgd_t pgdp_get_lockless(pgd_t *pgdp)
+-{
+-	unsigned long pgdval;
+-	pgd_t pgd;
+-	int i;
+-
+-retry:
+-	pgdval = READ_ONCE(pgdp->pgds[0]);
+-	pgd = *pgdp;
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		if (__page_val_to_pfn(pgdval) !=
+-		    __page_val_to_pfn(pgd.pgds[i]))
+-			goto retry;
+-		if ((__pte_pgprot(pgdval) | _PAGE_DIRTY | _PAGE_ACCESSED) !=
+-		    (__pte_pgprot(pgd.pgds[i]) | _PAGE_DIRTY | _PAGE_ACCESSED))
+-			goto retry;
+-
+-		if (__pgd_leaf(pgdval))
+-			pgdval += (1 << (PGDIR_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__pgd_present(pgdval))
+-			pgdval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pgd;
++	WRITE_ONCE(*ptep, pteval);
+ }
+-#define pgdp_get_lockless	pgdp_get_lockless
+-
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+ 
+ void flush_icache_pte(struct mm_struct *mm, pte_t pte);
+ 
+@@ -1002,25 +559,6 @@ static inline void __set_pte_at(struct mm_struct *mm, pte_t *ptep, pte_t pteval)
+ 
+ #define PFN_PTE_SHIFT		_PAGE_PFN_SHIFT
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-static inline pte_t pte_advance_pfn(pte_t pte, unsigned long nr)
+-{
+-	unsigned int i;
+-
+-	if (pte_present(pte) && !pte_napot(pte))
+-		for (i = 0; i < HW_PAGES_PER_PAGE; i++)
+-			pte.ptes[i] += nr << _PAGE_PFN_SHIFT;
+-
+-	return pte;
+-}
+-#else
+-static inline pte_t pte_advance_pfn(pte_t pte, unsigned long nr)
+-{
+-	return __pte(pte_val(pte) + (nr << _PAGE_PFN_SHIFT));
+-}
+-#endif
+-#define pte_advance_pfn		pte_advance_pfn
+-
+ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
+ 		pte_t *ptep, pte_t pteval, unsigned int nr)
+ {
+@@ -1031,7 +569,7 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
+ 		if (--nr == 0)
+ 			break;
+ 		ptep++;
+-		pteval = pte_advance_pfn(pteval, 1);
++		pte_val(pteval) += 1 << _PAGE_PFN_SHIFT;
+ 	}
+ }
+ #define set_ptes set_ptes
+@@ -1053,9 +591,10 @@ extern int ptep_test_and_clear_young(struct vm_area_struct *vma, unsigned long a
+ static inline pte_t ptep_get_and_clear(struct mm_struct *mm,
+ 				       unsigned long address, pte_t *ptep)
+ {
+-	pte_t pte = ptep_get(ptep);
+-	pte_clear(mm, address, ptep);
++	pte_t pte = __pte(atomic_long_xchg((atomic_long_t *)ptep, 0));
++
+ 	page_table_check_pte_clear(mm, pte);
++
+ 	return pte;
+ }
+ 
+@@ -1063,8 +602,7 @@ static inline pte_t ptep_get_and_clear(struct mm_struct *mm,
+ static inline void ptep_set_wrprotect(struct mm_struct *mm,
+ 				      unsigned long address, pte_t *ptep)
+ {
+-	pte_t old_pte = ptep_get(ptep);
+-	set_pte(ptep, pte_wrprotect(old_pte));
++	atomic_long_and(~(unsigned long)_PAGE_WRITE, (atomic_long_t *)ptep);
+ }
+ 
+ #define __HAVE_ARCH_PTEP_CLEAR_YOUNG_FLUSH
+@@ -1120,6 +658,11 @@ static inline pgprot_t pgprot_writecombine(pgprot_t _prot)
+ /*
+  * THP functions
+  */
++static inline pmd_t pte_pmd(pte_t pte)
++{
++	return __pmd(pte_val(pte));
++}
++
+ static inline pmd_t pmd_mkhuge(pmd_t pmd)
+ {
+ 	return pmd;
+@@ -1270,9 +813,8 @@ static inline int pmdp_test_and_clear_young(struct vm_area_struct *vma,
+ static inline pmd_t pmdp_huge_get_and_clear(struct mm_struct *mm,
+ 					unsigned long address, pmd_t *pmdp)
+ {
+-	pmd_t pmd = pmdp_get(pmdp);
++	pmd_t pmd = __pmd(atomic_long_xchg((atomic_long_t *)pmdp, 0));
+ 
+-	pmd_clear(pmdp);
+ 	page_table_check_pmd_clear(mm, pmd);
+ 
+ 	return pmd;
+@@ -1289,12 +831,8 @@ static inline void pmdp_set_wrprotect(struct mm_struct *mm,
+ static inline pmd_t pmdp_establish(struct vm_area_struct *vma,
+ 				unsigned long address, pmd_t *pmdp, pmd_t pmd)
+ {
+-	pmd_t old_pmd = pmdp_get(pmdp);
+-
+ 	page_table_check_pmd_set(vma->vm_mm, pmdp, pmd);
+-	set_pmd(pmdp, pmd);
+-
+-	return old_pmd;
++	return __pmd(atomic_long_xchg((atomic_long_t *)pmdp, pmd_val(pmd)));
+ }
+ 
+ #define pmdp_collapse_flush pmdp_collapse_flush
+@@ -1329,7 +867,7 @@ extern pmd_t pmdp_collapse_flush(struct vm_area_struct *vma,
+ 	  ((offset) << __SWP_OFFSET_SHIFT) })
+ 
+ #define __pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
+-#define __swp_entry_to_pte(x)	(__pte((x).val))
++#define __swp_entry_to_pte(x)	((pte_t) { (x).val })
+ 
+ static inline int pte_swp_exclusive(pte_t pte)
+ {
+@@ -1338,12 +876,12 @@ static inline int pte_swp_exclusive(pte_t pte)
+ 
+ static inline pte_t pte_swp_mkexclusive(pte_t pte)
+ {
+-	return pte_set_flag(pte, _PAGE_SWP_EXCLUSIVE);
++	return __pte(pte_val(pte) | _PAGE_SWP_EXCLUSIVE);
+ }
+ 
+ static inline pte_t pte_swp_clear_exclusive(pte_t pte)
+ {
+-	return pte_clear_flag(pte, _PAGE_SWP_EXCLUSIVE);
++	return __pte(pte_val(pte) & ~_PAGE_SWP_EXCLUSIVE);
+ }
+ 
+ #ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
+@@ -1377,11 +915,7 @@ static inline pte_t pte_swp_clear_exclusive(pte_t pte)
+  * Similarly for SV57, bits 63–57 must be equal to bit 56.
+  */
+ #ifdef CONFIG_64BIT
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-#define TASK_SIZE_64	(PGDIR_SIZE * __PTRS_PER_PGD / 2)
+-#else
+ #define TASK_SIZE_64	(PGDIR_SIZE * PTRS_PER_PGD / 2)
+-#endif
+ #define TASK_SIZE_MAX	LONG_MAX
+ 
+ #ifdef CONFIG_COMPAT
+diff --git a/arch/riscv/include/asm/tlbflush.h b/arch/riscv/include/asm/tlbflush.h
+index 25cc39ab84d5..72e559934952 100644
+--- a/arch/riscv/include/asm/tlbflush.h
++++ b/arch/riscv/include/asm/tlbflush.h
+@@ -29,32 +29,18 @@ static inline void local_flush_tlb_all_asid(unsigned long asid)
+ }
+ 
+ /* Flush one page from local TLB */
+-static inline void local_flush_tlb_page(unsigned long addr,
+-					unsigned long page_size)
++static inline void local_flush_tlb_page(unsigned long addr)
+ {
+-	unsigned int i;
+-	unsigned long hw_page_num = 1 << (PAGE_SHIFT - HW_PAGE_SHIFT);
+-	unsigned long hw_page_size = page_size >> (PAGE_SHIFT - HW_PAGE_SHIFT);
+-
+-	for (i = 0; i < hw_page_num; i++, addr += hw_page_size)
+-		ALT_SFENCE_VMA_ADDR(addr);
++	ALT_SFENCE_VMA_ADDR(addr);
+ }
+ 
+ static inline void local_flush_tlb_page_asid(unsigned long addr,
+-					     unsigned long page_size,
+ 					     unsigned long asid)
+ {
+-	unsigned int i;
+-	unsigned long hw_page_num, hw_page_size;
+-
+-	if (asid != FLUSH_TLB_NO_ASID) {
+-		hw_page_num = 1 << (PAGE_SHIFT - HW_PAGE_SHIFT);
+-		hw_page_size = page_size >> (PAGE_SHIFT - HW_PAGE_SHIFT);
+-
+-		for (i = 0; i < hw_page_num; i++, addr += hw_page_size)
+-			ALT_SFENCE_VMA_ADDR_ASID(addr, asid);
+-	} else
+-		local_flush_tlb_page(addr, page_size);
++	if (asid != FLUSH_TLB_NO_ASID)
++		ALT_SFENCE_VMA_ADDR_ASID(addr, asid);
++	else
++		local_flush_tlb_page(addr);
+ }
+ 
+ void flush_tlb_all(void);
+diff --git a/arch/riscv/include/uapi/asm/param.h b/arch/riscv/include/uapi/asm/param.h
+deleted file mode 100644
+index 1221e570a077..000000000000
+--- a/arch/riscv/include/uapi/asm/param.h
++++ /dev/null
+@@ -1,24 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+-/*
+- * Copyright (C) 2024 RISCV Ltd.
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+- */
+-#ifndef __ASM_PARAM_H
+-#define __ASM_PARAM_H
+-
+-#define EXEC_PAGESIZE	65536
+-
+-#include <asm-generic/param.h>
+-
+-#endif
+diff --git a/arch/riscv/kernel/head.S b/arch/riscv/kernel/head.S
+index b8568e3ddefa..356d5397b2a2 100644
+--- a/arch/riscv/kernel/head.S
++++ b/arch/riscv/kernel/head.S
+@@ -86,7 +86,7 @@ relocate_enable_mmu:
+ 	csrw CSR_TVEC, a2
+ 
+ 	/* Compute satp for kernel page tables, but don't load it yet */
+-	srl a2, a0, HW_PAGE_SHIFT
++	srl a2, a0, PAGE_SHIFT
+ 	la a1, satp_mode
+ 	XIP_FIXUP_OFFSET a1
+ 	REG_L a1, 0(a1)
+@@ -100,7 +100,7 @@ relocate_enable_mmu:
+ 	 */
+ 	la a0, trampoline_pg_dir
+ 	XIP_FIXUP_OFFSET a0
+-	srl a0, a0, HW_PAGE_SHIFT
++	srl a0, a0, PAGE_SHIFT
+ 	or a0, a0, a1
+ 	sfence.vma
+ 	csrw CSR_SATP, a0
+diff --git a/arch/riscv/kernel/hibernate.c b/arch/riscv/kernel/hibernate.c
+index 5018d38f5280..671b686c0158 100644
+--- a/arch/riscv/kernel/hibernate.c
++++ b/arch/riscv/kernel/hibernate.c
+@@ -171,7 +171,7 @@ static int temp_pgtable_map_pte(pmd_t *dst_pmdp, pmd_t *src_pmdp, unsigned long
+ 	pte_t *src_ptep;
+ 	pte_t *dst_ptep;
+ 
+-	if (pmd_none(pmdp_get_lockless(dst_pmdp))) {
++	if (pmd_none(READ_ONCE(*dst_pmdp))) {
+ 		dst_ptep = (pte_t *)get_safe_page(GFP_ATOMIC);
+ 		if (!dst_ptep)
+ 			return -ENOMEM;
+@@ -183,7 +183,7 @@ static int temp_pgtable_map_pte(pmd_t *dst_pmdp, pmd_t *src_pmdp, unsigned long
+ 	src_ptep = pte_offset_kernel(src_pmdp, start);
+ 
+ 	do {
+-		pte_t pte = ptep_get_lockless(src_ptep);
++		pte_t pte = READ_ONCE(*src_ptep);
+ 
+ 		if (pte_present(pte))
+ 			set_pte(dst_ptep, __pte(pte_val(pte) | pgprot_val(prot)));
+@@ -200,7 +200,7 @@ static int temp_pgtable_map_pmd(pud_t *dst_pudp, pud_t *src_pudp, unsigned long
+ 	pmd_t *src_pmdp;
+ 	pmd_t *dst_pmdp;
+ 
+-	if (pud_none(pudp_get_lockless(dst_pudp))) {
++	if (pud_none(READ_ONCE(*dst_pudp))) {
+ 		dst_pmdp = (pmd_t *)get_safe_page(GFP_ATOMIC);
+ 		if (!dst_pmdp)
+ 			return -ENOMEM;
+@@ -212,7 +212,7 @@ static int temp_pgtable_map_pmd(pud_t *dst_pudp, pud_t *src_pudp, unsigned long
+ 	src_pmdp = pmd_offset(src_pudp, start);
+ 
+ 	do {
+-		pmd_t pmd = pmdp_get_lockless(src_pmdp);
++		pmd_t pmd = READ_ONCE(*src_pmdp);
+ 
+ 		next = pmd_addr_end(start, end);
+ 
+@@ -239,7 +239,7 @@ static int temp_pgtable_map_pud(p4d_t *dst_p4dp, p4d_t *src_p4dp, unsigned long
+ 	pud_t *dst_pudp;
+ 	pud_t *src_pudp;
+ 
+-	if (p4d_none(p4dp_get_lockless(dst_p4dp))) {
++	if (p4d_none(READ_ONCE(*dst_p4dp))) {
+ 		dst_pudp = (pud_t *)get_safe_page(GFP_ATOMIC);
+ 		if (!dst_pudp)
+ 			return -ENOMEM;
+@@ -251,7 +251,7 @@ static int temp_pgtable_map_pud(p4d_t *dst_p4dp, p4d_t *src_p4dp, unsigned long
+ 	src_pudp = pud_offset(src_p4dp, start);
+ 
+ 	do {
+-		pud_t pud = pudp_get_lockless(src_pudp);
++		pud_t pud = READ_ONCE(*src_pudp);
+ 
+ 		next = pud_addr_end(start, end);
+ 
+@@ -278,7 +278,7 @@ static int temp_pgtable_map_p4d(pgd_t *dst_pgdp, pgd_t *src_pgdp, unsigned long
+ 	p4d_t *dst_p4dp;
+ 	p4d_t *src_p4dp;
+ 
+-	if (pgd_none(pgdp_get_lockless(dst_pgdp))) {
++	if (pgd_none(READ_ONCE(*dst_pgdp))) {
+ 		dst_p4dp = (p4d_t *)get_safe_page(GFP_ATOMIC);
+ 		if (!dst_p4dp)
+ 			return -ENOMEM;
+@@ -290,7 +290,7 @@ static int temp_pgtable_map_p4d(pgd_t *dst_pgdp, pgd_t *src_pgdp, unsigned long
+ 	src_p4dp = p4d_offset(src_pgdp, start);
+ 
+ 	do {
+-		p4d_t p4d = p4dp_get_lockless(src_p4dp);
++		p4d_t p4d = READ_ONCE(*src_p4dp);
+ 
+ 		next = p4d_addr_end(start, end);
+ 
+@@ -317,7 +317,7 @@ static int temp_pgtable_mapping(pgd_t *pgdp, unsigned long start, unsigned long
+ 	unsigned long ret;
+ 
+ 	do {
+-		pgd_t pgd = pgdp_get_lockless(src_pgdp);
++		pgd_t pgd = READ_ONCE(*src_pgdp);
+ 
+ 		next = pgd_addr_end(start, end);
+ 
+@@ -395,8 +395,7 @@ int swsusp_arch_resume(void)
+ 	if (ret)
+ 		return ret;
+ 
+-	hibernate_restore_image(resume_hdr.saved_satp,
+-				make_satp(PFN_DOWN(__pa(resume_pg_dir)), 0, satp_mode),
++	hibernate_restore_image(resume_hdr.saved_satp, (PFN_DOWN(__pa(resume_pg_dir)) | satp_mode),
+ 				resume_hdr.restore_cpu_addr);
+ 
+ 	return 0;
+diff --git a/arch/riscv/kernel/sbi.c b/arch/riscv/kernel/sbi.c
+index 4d4bd602d393..1989b8cade1b 100644
+--- a/arch/riscv/kernel/sbi.c
++++ b/arch/riscv/kernel/sbi.c
+@@ -57,7 +57,7 @@ static unsigned long __sbi_v01_cpumask_to_hartmask(const struct cpumask *cpu_mas
+  */
+ void sbi_console_putchar(int ch)
+ {
+-  /* sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0); */
++	sbi_ecall(SBI_EXT_0_1_CONSOLE_PUTCHAR, 0, ch, 0, 0, 0, 0, 0);
+ }
+ EXPORT_SYMBOL(sbi_console_putchar);
+ 
+diff --git a/arch/riscv/mm/context.c b/arch/riscv/mm/context.c
+index 229c78d9ad3a..4abe3de23225 100644
+--- a/arch/riscv/mm/context.c
++++ b/arch/riscv/mm/context.c
+@@ -189,8 +189,9 @@ static void set_mm_asid(struct mm_struct *mm, unsigned int cpu)
+ 	raw_spin_unlock_irqrestore(&context_lock, flags);
+ 
+ switch_mm_fast:
+-	csr_write(CSR_SATP, make_satp(virt_to_pfn(mm->pgd), cntx2asid(cntx),
+-				      satp_mode));
++	csr_write(CSR_SATP, virt_to_pfn(mm->pgd) |
++		  (cntx2asid(cntx) << SATP_ASID_SHIFT) |
++		  satp_mode);
+ 
+ 	if (need_flush_tlb)
+ 		local_flush_tlb_all();
+@@ -199,7 +200,7 @@ static void set_mm_asid(struct mm_struct *mm, unsigned int cpu)
+ static void set_mm_noasid(struct mm_struct *mm)
+ {
+ 	/* Switch the page table and blindly nuke entire local TLB */
+-	csr_write(CSR_SATP, make_satp(virt_to_pfn(mm->pgd), 0, satp_mode));
++	csr_write(CSR_SATP, virt_to_pfn(mm->pgd) | satp_mode);
+ 	local_flush_tlb_all_asid(0);
+ }
+ 
+diff --git a/arch/riscv/mm/fault.c b/arch/riscv/mm/fault.c
+index 94524e5adc0b..a9f2b4af8f3f 100644
+--- a/arch/riscv/mm/fault.c
++++ b/arch/riscv/mm/fault.c
+@@ -118,7 +118,7 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
+ 	pmd_t *pmd_k;
+ 	pte_t *pte_k;
+ 	int index;
+-	unsigned long pfn, page_size;
++	unsigned long pfn;
+ 
+ 	/* User mode accesses just cause a SIGSEGV */
+ 	if (user_mode(regs))
+@@ -133,7 +133,7 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
+ 	 * of a task switch.
+ 	 */
+ 	index = pgd_index(addr);
+-	pfn = satp_pfn(csr_read(CSR_SATP));
++	pfn = csr_read(CSR_SATP) & SATP_PPN;
+ 	pgd = (pgd_t *)pfn_to_virt(pfn) + index;
+ 	pgd_k = init_mm.pgd + index;
+ 
+@@ -154,10 +154,8 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
+ 		no_context(regs, addr);
+ 		return;
+ 	}
+-	if (pud_leaf(pudp_get(pud_k))) {
+-		page_size = PUD_SIZE;
++	if (pud_leaf(pudp_get(pud_k)))
+ 		goto flush_tlb;
+-	}
+ 
+ 	/*
+ 	 * Since the vmalloc area is global, it is unnecessary
+@@ -168,10 +166,8 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
+ 		no_context(regs, addr);
+ 		return;
+ 	}
+-	if (pmd_leaf(pmdp_get(pmd_k))) {
+-		page_size = PMD_SIZE;
++	if (pmd_leaf(pmdp_get(pmd_k)))
+ 		goto flush_tlb;
+-	}
+ 
+ 	/*
+ 	 * Make sure the actual PTE exists as well to
+@@ -184,7 +180,6 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
+ 		no_context(regs, addr);
+ 		return;
+ 	}
+-	page_size = PAGE_SIZE;
+ 
+ 	/*
+ 	 * The kernel assumes that TLBs don't cache invalid
+@@ -193,7 +188,7 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
+ 	 * necessary even after writing invalid entries.
+ 	 */
+ flush_tlb:
+-	local_flush_tlb_page(addr, page_size);
++	local_flush_tlb_page(addr);
+ }
+ 
+ static inline bool access_error(unsigned long cause, struct vm_area_struct *vma)
+diff --git a/arch/riscv/mm/hugetlbpage.c b/arch/riscv/mm/hugetlbpage.c
+index 4286c7dea68d..42314f093922 100644
+--- a/arch/riscv/mm/hugetlbpage.c
++++ b/arch/riscv/mm/hugetlbpage.c
+@@ -2,27 +2,6 @@
+ #include <linux/hugetlb.h>
+ #include <linux/err.h>
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-pte_t mk_huge_pte(struct vm_area_struct *vma, struct page *page, pgprot_t pgprot)
+-{
+-	pte_t pte;
+-	unsigned int shift = huge_page_shift(hstate_vma(vma));
+-
+-	if (shift == PGDIR_SHIFT)
+-		pte = pgd_pte(pfn_pgd(page_to_pfn(page), pgprot));
+-	else if (shift == P4D_SHIFT)
+-		pte = p4d_pte(pfn_p4d(page_to_pfn(page), pgprot));
+-	else if (shift == PUD_SHIFT)
+-		pte = pud_pte(pfn_pud(page_to_pfn(page), pgprot));
+-	else if (shift == PMD_SHIFT)
+-		pte = pmd_pte(pfn_pmd(page_to_pfn(page), pgprot));
+-	else
+-		pte = pfn_pte(page_to_pfn(page), pgprot);
+-
+-	return pte;
+-}
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ #ifdef CONFIG_RISCV_ISA_SVNAPOT
+ pte_t huge_ptep_get(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
+ {
+@@ -95,7 +74,7 @@ pte_t *huge_pte_alloc(struct mm_struct *mm,
+ 
+ out:
+ 	if (pte) {
+-		pte_t pteval = ptep_get(pte);
++		pte_t pteval = ptep_get_lockless(pte);
+ 
+ 		WARN_ON_ONCE(pte_present(pteval) && !pte_huge(pteval));
+ 	}
+@@ -212,7 +191,7 @@ pte_t arch_make_huge_pte(pte_t entry, unsigned int shift, vm_flags_t flags)
+ 			break;
+ 		}
+ 	}
+-	if (order == NAPOT_PAGE_ORDER_MAX)
++	if (order == NAPOT_ORDER_MAX)
+ 		entry = pte_mkhuge(entry);
+ 
+ 	return entry;
+@@ -405,8 +384,7 @@ static __init int napot_hugetlbpages_init(void)
+ 		unsigned long order;
+ 
+ 		for_each_napot_order(order)
+-			if (napot_cont_shift(order) > PAGE_SHIFT)
+-				hugetlb_add_hstate(order);
++			hugetlb_add_hstate(order);
+ 	}
+ 	return 0;
+ }
+@@ -427,7 +405,7 @@ static bool __hugetlb_valid_size(unsigned long size)
+ 		return true;
+ 	else if (IS_ENABLED(CONFIG_64BIT) && size == PUD_SIZE)
+ 		return true;
+-	else if (is_napot_size(size) && size > PAGE_SIZE)
++	else if (is_napot_size(size))
+ 		return true;
+ 	else
+ 		return false;
+diff --git a/arch/riscv/mm/init.c b/arch/riscv/mm/init.c
+index 669ca7e22c09..0e8c20adcd98 100644
+--- a/arch/riscv/mm/init.c
++++ b/arch/riscv/mm/init.c
+@@ -236,9 +236,6 @@ static void __init setup_bootmem(void)
+ 	 */
+ 	memblock_reserve(vmlinux_start, vmlinux_end - vmlinux_start);
+ 
+-
+-	memblock_reserve(1UL<<21, 1UL<<22);
+-	memblock_reserve(256*1024*1024, 0x101fffff);
+ 	/*
+ 	 * Make sure we align the start of the memory on a PMD boundary so that
+ 	 * at worst, we map the linear mapping with PMD mappings.
+@@ -359,7 +356,7 @@ void __set_fixmap(enum fixed_addresses idx, phys_addr_t phys, pgprot_t prot)
+ 		set_pte(ptep, pfn_pte(phys >> PAGE_SHIFT, prot));
+ 	else
+ 		pte_clear(&init_mm, addr, ptep);
+-	local_flush_tlb_page(addr, PAGE_SIZE);
++	local_flush_tlb_page(addr);
+ }
+ 
+ static inline pte_t *__init get_pte_virt_early(phys_addr_t pa)
+@@ -698,15 +695,15 @@ static uintptr_t __meminit best_map_size(phys_addr_t pa, uintptr_t va, phys_addr
+ 		return PAGE_SIZE;
+ 
+ 	if (pgtable_l5_enabled &&
+-	    !(pa & (__P4D_SIZE - 1)) && !(va & (P4D_SIZE - 1)) && size >= P4D_SIZE)
++	    !(pa & (P4D_SIZE - 1)) && !(va & (P4D_SIZE - 1)) && size >= P4D_SIZE)
+ 		return P4D_SIZE;
+ 
+ 	if (pgtable_l4_enabled &&
+-	    !(pa & (__PUD_SIZE - 1)) && !(va & (PUD_SIZE - 1)) && size >= PUD_SIZE)
++	    !(pa & (PUD_SIZE - 1)) && !(va & (PUD_SIZE - 1)) && size >= PUD_SIZE)
+ 		return PUD_SIZE;
+ 
+ 	if (IS_ENABLED(CONFIG_64BIT) &&
+-	    !(pa & (__PMD_SIZE - 1)) && !(va & (PMD_SIZE - 1)) && size >= PMD_SIZE)
++	    !(pa & (PMD_SIZE - 1)) && !(va & (PMD_SIZE - 1)) && size >= PMD_SIZE)
+ 		return PMD_SIZE;
+ 
+ 	return PAGE_SIZE;
+@@ -839,7 +836,7 @@ static __init void set_satp_mode(uintptr_t dtb_pa)
+ 				(uintptr_t)early_p4d : (uintptr_t)early_pud,
+ 			   PGDIR_SIZE, PAGE_TABLE);
+ 
+-	identity_satp = make_satp(PFN_DOWN((uintptr_t)&early_pg_dir), 0, satp_mode);
++	identity_satp = PFN_DOWN((uintptr_t)&early_pg_dir) | satp_mode;
+ 
+ 	local_flush_tlb_all();
+ 	csr_write(CSR_SATP, identity_satp);
+@@ -940,33 +937,17 @@ static void __init create_kernel_page_table(pgd_t *pgdir,
+ 				   PMD_SIZE, PAGE_KERNEL);
+ }
+ #else
+-
+-#ifdef CONFIG_RISCV_64K_PAGES
+-/* TODO: better implementation */
+-#define KERNEL_MAP_STEP			PAGE_SIZE
+-#else
+-#define KERNEL_MAP_STEP			PMD_SIZE
+-#endif
+-
+ static void __init create_kernel_page_table(pgd_t *pgdir, bool early)
+ {
+ 	uintptr_t va, end_va;
+ 
+ 	end_va = kernel_map.virt_addr + kernel_map.size;
+-	if (early)
+-		for (va = kernel_map.virt_addr; va < end_va; va += PMD_SIZE)
+-			create_pgd_mapping(pgdir, va,
+-					   kernel_map.phys_addr + (va - kernel_map.virt_addr),
+-					   PMD_SIZE,
+-					   early ?
+-						PAGE_KERNEL_EXEC : pgprot_from_va(va));
+-	else
+-		for (va = kernel_map.virt_addr; va < end_va; va += KERNEL_MAP_STEP)
+-			create_pgd_mapping(pgdir, va,
+-					   kernel_map.phys_addr + (va - kernel_map.virt_addr),
+-					   KERNEL_MAP_STEP,
+-					   early ?
+-						PAGE_KERNEL_EXEC : pgprot_from_va(va));
++	for (va = kernel_map.virt_addr; va < end_va; va += PMD_SIZE)
++		create_pgd_mapping(pgdir, va,
++				   kernel_map.phys_addr + (va - kernel_map.virt_addr),
++				   PMD_SIZE,
++				   early ?
++					PAGE_KERNEL_EXEC : pgprot_from_va(va));
+ }
+ #endif
+ 
+@@ -979,8 +960,8 @@ static void __init create_fdt_early_page_table(uintptr_t fix_fdt_va,
+ 					       uintptr_t dtb_pa)
+ {
+ #ifndef CONFIG_BUILTIN_DTB
+-  uintptr_t pa = dtb_pa & ~(PMD_SIZE - 1);
+-	//printk(KERN_INFO "dtb pa = %lx\n", pa);
++	uintptr_t pa = dtb_pa & ~(PMD_SIZE - 1);
++
+ 	/* Make sure the fdt fixmap address is always aligned on PMD size */
+ 	BUILD_BUG_ON(FIX_FDT % (PMD_SIZE / PAGE_SIZE));
+ 
+@@ -1007,7 +988,6 @@ static void __init create_fdt_early_page_table(uintptr_t fix_fdt_va,
+ #endif
+ 
+ 	dtb_early_pa = dtb_pa;
+-	
+ }
+ 
+ /*
+@@ -1158,7 +1138,7 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
+ 
+ 	/* Sanity check alignment and size */
+ 	BUG_ON((PAGE_OFFSET % PGDIR_SIZE) != 0);
+-	BUG_ON((kernel_map.phys_addr % __PMD_SIZE) != 0);
++	BUG_ON((kernel_map.phys_addr % PMD_SIZE) != 0);
+ 
+ #ifdef CONFIG_64BIT
+ 	/*
+@@ -1336,8 +1316,6 @@ static void __init create_linear_mapping_page_table(void)
+ 
+ static void __init setup_vm_final(void)
+ {
+-	unsigned long satp;
+-
+ 	/* Setup swapper PGD for fixmap */
+ #if !defined(CONFIG_64BIT)
+ 	/*
+@@ -1371,8 +1349,7 @@ static void __init setup_vm_final(void)
+ 	clear_fixmap(FIX_P4D);
+ 
+ 	/* Move to swapper page table */
+-	satp = make_satp(PFN_DOWN(__pa_symbol(swapper_pg_dir)), 0, satp_mode);
+-	csr_write(CSR_SATP, satp);
++	csr_write(CSR_SATP, PFN_DOWN(__pa_symbol(swapper_pg_dir)) | satp_mode);
+ 	local_flush_tlb_all();
+ 
+ 	pt_ops_set_late();
+diff --git a/arch/riscv/mm/kasan_init.c b/arch/riscv/mm/kasan_init.c
+index 3eee1665358e..c301c8d291d2 100644
+--- a/arch/riscv/mm/kasan_init.c
++++ b/arch/riscv/mm/kasan_init.c
+@@ -482,13 +482,11 @@ static void __init create_tmp_mapping(void)
+ 
+ void __init kasan_init(void)
+ {
+-	unsigned long satp;
+ 	phys_addr_t p_start, p_end;
+ 	u64 i;
+ 
+ 	create_tmp_mapping();
+-	satp = make_satp(PFN_DOWN(__pa(tmp_pg_dir)), 0, satp_mode);
+-	csr_write(CSR_SATP, satp);
++	csr_write(CSR_SATP, PFN_DOWN(__pa(tmp_pg_dir)) | satp_mode);
+ 
+ 	kasan_early_clear_pgd(pgd_offset_k(KASAN_SHADOW_START),
+ 			      KASAN_SHADOW_START, KASAN_SHADOW_END);
+@@ -533,7 +531,6 @@ void __init kasan_init(void)
+ 	memset(kasan_early_shadow_page, KASAN_SHADOW_INIT, PAGE_SIZE);
+ 	init_task.kasan_depth = 0;
+ 
+-	satp = make_satp(PFN_DOWN(__pa(swapper_pg_dir)), 0, satp_mode);
+-	csr_write(CSR_SATP, satp);
++	csr_write(CSR_SATP, PFN_DOWN(__pa(swapper_pg_dir)) | satp_mode);
+ 	local_flush_tlb_all();
+ }
+diff --git a/arch/riscv/mm/pgtable.c b/arch/riscv/mm/pgtable.c
+index 0bcaffe798d5..4ae67324f992 100644
+--- a/arch/riscv/mm/pgtable.c
++++ b/arch/riscv/mm/pgtable.c
+@@ -5,105 +5,6 @@
+ #include <linux/kernel.h>
+ #include <linux/pgtable.h>
+ 
+-#ifdef CONFIG_RISCV_USE_SW_PAGE
+-
+-pte_t __pte(unsigned long pteval)
+-{
+-	pte_t pte;
+-	unsigned int i;
+-	unsigned int order;
+-
+-	if (has_svnapot() && __pte_present(pteval) && !__pte_napot(pteval))
+-		for_each_napot_order(order)
+-			if (napot_cont_shift(order) == PAGE_SHIFT)
+-				pteval = __pte_mknapot(pteval, order);
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		pte.ptes[i] = pteval;
+-		if (__pte_present(pteval) && !__pte_napot(pteval))
+-			pteval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pte;
+-}
+-EXPORT_SYMBOL(__pte);
+-
+-pgd_t __pgd(unsigned long pgdval)
+-{
+-	pgd_t pgd;
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		pgd.pgds[i] = pgdval;
+-		if (__pgd_leaf(pgdval))
+-			pgdval += (1 << (PGDIR_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__pgd_present(pgdval))
+-			pgdval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pgd;
+-}
+-EXPORT_SYMBOL(__pgd);
+-
+-#ifdef CONFIG_64BIT
+-p4d_t __p4d(unsigned long p4dval)
+-{
+-	p4d_t p4d;
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		p4d.p4ds[i] = p4dval;
+-		if (__p4d_leaf(p4dval))
+-			p4dval += (1 << (P4D_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__p4d_present(p4dval))
+-			p4dval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return p4d;
+-}
+-EXPORT_SYMBOL(__p4d);
+-
+-pud_t __pud(unsigned long pudval)
+-{
+-	pud_t pud;
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		pud.puds[i] = pudval;
+-		if (__pud_leaf(pudval))
+-			pudval += (1 << (PUD_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__pud_present(pudval))
+-			pudval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pud;
+-}
+-EXPORT_SYMBOL(__pud);
+-
+-pmd_t __pmd(unsigned long pmdval)
+-{
+-	pmd_t pmd;
+-	unsigned int i;
+-
+-	for (i = 0; i < HW_PAGES_PER_PAGE; i++) {
+-		pmd.pmds[i] = pmdval;
+-		if (__pmd_leaf(pmdval))
+-			pmdval += (1 << (PMD_SHIFT - PAGE_SHIFT)) <<
+-					_PAGE_HWPFN_SHIFT;
+-		else if (__pmd_present(pmdval))
+-			pmdval += 1 << _PAGE_HWPFN_SHIFT;
+-	}
+-
+-	return pmd;
+-}
+-EXPORT_SYMBOL(__pmd);
+-#endif /* CONFIG_64BIT */
+-
+-#endif /* CONFIG_RISCV_USE_SW_PAGE */
+-
+ int ptep_set_access_flags(struct vm_area_struct *vma,
+ 			  unsigned long address, pte_t *ptep,
+ 			  pte_t entry, int dirty)
+@@ -134,15 +35,9 @@ int ptep_test_and_clear_young(struct vm_area_struct *vma,
+ 			      unsigned long address,
+ 			      pte_t *ptep)
+ {
+-	int r = 1;
+-	pte_t pte = ptep_get(ptep);
+-
+-	if (!pte_young(pte))
+-		r = 0;
+-	else
+-		set_pte(ptep, pte_mkold(pte));
+-
+-	return r;
++	if (!pte_young(ptep_get(ptep)))
++		return 0;
++	return test_and_clear_bit(_PAGE_ACCESSED_OFFSET, &pte_val(*ptep));
+ }
+ EXPORT_SYMBOL_GPL(ptep_test_and_clear_young);
+ 
+diff --git a/arch/riscv/mm/tlbflush.c b/arch/riscv/mm/tlbflush.c
+index d5036f2a8244..9b6e86ce3867 100644
+--- a/arch/riscv/mm/tlbflush.c
++++ b/arch/riscv/mm/tlbflush.c
+@@ -27,7 +27,7 @@ static void local_flush_tlb_range_threshold_asid(unsigned long start,
+ 	}
+ 
+ 	for (i = 0; i < nr_ptes_in_range; ++i) {
+-		local_flush_tlb_page_asid(start, stride, asid);
++		local_flush_tlb_page_asid(start, asid);
+ 		start += stride;
+ 	}
+ }
+@@ -36,7 +36,7 @@ static inline void local_flush_tlb_range_asid(unsigned long start,
+ 		unsigned long size, unsigned long stride, unsigned long asid)
+ {
+ 	if (size <= stride)
+-		local_flush_tlb_page_asid(start, stride, asid);
++		local_flush_tlb_page_asid(start, asid);
+ 	else if (size == FLUSH_TLB_MAX_SIZE)
+ 		local_flush_tlb_all_asid(asid);
+ 	else
+@@ -126,7 +126,14 @@ void flush_tlb_mm_range(struct mm_struct *mm,
+ 			  start, end - start, page_size);
+ }
+ 
+-static inline unsigned long local_flush_tlb_page_size(struct vm_area_struct *vma)
++void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
++{
++	__flush_tlb_range(mm_cpumask(vma->vm_mm), get_mm_asid(vma->vm_mm),
++			  addr, PAGE_SIZE, PAGE_SIZE);
++}
++
++void flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
++		     unsigned long end)
+ {
+ 	unsigned long stride_size;
+ 
+@@ -154,24 +161,6 @@ static inline unsigned long local_flush_tlb_page_size(struct vm_area_struct *vma
+ 		}
+ 	}
+ 
+-	return stride_size;
+-}
+-
+-void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
+-{
+-	unsigned long page_size;
+-
+-	page_size = local_flush_tlb_page_size(vma);
+-	__flush_tlb_range(mm_cpumask(vma->vm_mm), get_mm_asid(vma->vm_mm),
+-			  addr, page_size, page_size);
+-}
+-
+-void flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
+-		     unsigned long end)
+-{
+-	unsigned long stride_size;
+-
+-	stride_size = local_flush_tlb_page_size(vma);
+ 	__flush_tlb_range(mm_cpumask(vma->vm_mm), get_mm_asid(vma->vm_mm),
+ 			  start, end - start, stride_size);
+ }
+diff --git a/arch/s390/include/asm/hugetlb.h b/arch/s390/include/asm/hugetlb.h
+index cea9118d4bba..cf1b5d6fb1a6 100644
+--- a/arch/s390/include/asm/hugetlb.h
++++ b/arch/s390/include/asm/hugetlb.h
+@@ -79,7 +79,7 @@ static inline void huge_ptep_set_wrprotect(struct mm_struct *mm,
+ 	__set_huge_pte_at(mm, addr, ptep, pte_wrprotect(pte));
+ }
+ 
+-static inline pte_t mk_huge_pte(struct vm_area_struct *vma, struct page *page, pgprot_t pgprot)
++static inline pte_t mk_huge_pte(struct page *page, pgprot_t pgprot)
+ {
+ 	return mk_pte(page, pgprot);
+ }
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 4312d84e9340..3fe7e2a9bd29 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -9,10 +9,6 @@ config SENSORS_LIS3LV02D
+ 	tristate
+ 	depends on INPUT
+ 
+-config CSR_CONSOLE
+-       tristate "CSR-based console for RISCV"
+-       depends on RISCV
+-
+ config AD525X_DPOT
+ 	tristate "Analog Devices Digital Potentiometers"
+ 	depends on (I2C || SPI) && SYSFS
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index f299006d8156..a9f94525e181 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -3,7 +3,6 @@
+ # Makefile for misc devices that really don't fit anywhere else.
+ #
+ 
+-obj-$(CONFIG_CSR_CONSOLE)       += csr_console.o
+ obj-$(CONFIG_IBM_ASM)		+= ibmasm/
+ obj-$(CONFIG_IBMVMC)		+= ibmvmc.o
+ obj-$(CONFIG_AD525X_DPOT)	+= ad525x_dpot.o
+diff --git a/drivers/misc/csr_console.c b/drivers/misc/csr_console.c
+deleted file mode 100644
+index 19204f0d271d..000000000000
+--- a/drivers/misc/csr_console.c
++++ /dev/null
+@@ -1,223 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0
+-/*
+- * Simple kernel console driver for STM devices
+- * Copyright (c) 2014, Intel Corporation.
+- *
+- * STM console will send kernel messages over STM devices to a trace host.
+- */
+-
+-#include <linux/kernel.h>
+-#include <linux/module.h>
+-#include <linux/console.h>
+-#include <linux/tty.h>
+-#include <linux/slab.h>
+-#include <linux/spinlock.h>
+-
+-static int csr_console_setup(struct console *c, char *opts);
+-static void csr_console_write(struct console *c, const char *buf, unsigned len);
+-static struct tty_driver *csr_console_device(struct console *c, int *index);
+-
+-
+-static struct console csr_console = {
+-  .name = "csr_console",
+-  .write		= csr_console_write,
+-  .setup		= csr_console_setup,
+-  .device               = csr_console_device,
+-  .flags		= CON_PRINTBUFFER | CON_CONSDEV ,
+-  .index		= -1,
+-};
+-
+-
+-struct ttyprintk_port {
+-	struct tty_port port;
+-	spinlock_t spinlock;
+-};
+-
+-static struct ttyprintk_port tpk_port;
+-
+-/*
+- * Our simple preformatting supports transparent output of (time-stamped)
+- * printk messages (also suitable for logging service):
+- * - any cr is replaced by nl
+- * - adds a ttyprintk source tag in front of each line
+- * - too long message is fragmented, with '\'nl between fragments
+- * - TPK_STR_SIZE isn't really the write_room limiting factor, because
+- *   it is emptied on the fly during preformatting.
+- */
+-#define TPK_STR_SIZE 508 /* should be bigger then max expected line length */
+-#define TPK_MAX_ROOM 4096 /* we could assume 4K for instance */
+-
+-static void csr_print(const char *buf, int len) {
+-  int i;
+-  for(i = 0; i < len; i++) {
+-    while(csr_read(0xc03) != 0) {}
+-    csr_write(0xc03, buf[i]);
+-  }
+-}
+-
+-
+-
+-/*
+- * TTY operations open function.
+- */
+-static int tpk_open(struct tty_struct *tty, struct file *filp)
+-{
+-	tty->driver_data = &tpk_port;
+-	return tty_port_open(&tpk_port.port, tty, filp);
+-}
+-
+-/*
+- * TTY operations close function.
+- */
+-static void tpk_close(struct tty_struct *tty, struct file *filp)
+-{
+-	struct ttyprintk_port *tpkp = tty->driver_data;
+-	unsigned long flags;
+-	tty_port_close(&tpkp->port, tty, filp);
+-}
+-
+-/*
+- * TTY operations write function.
+- */
+-static ssize_t tpk_write(struct tty_struct *tty,
+-			 const unsigned char *buf, size_t count)
+-{
+-	struct ttyprintk_port *tpkp = tty->driver_data;
+-	unsigned long flags;
+-	int ret;
+-
+-
+-	/* exclusive use of tpk_printk within this tty */
+-	spin_lock_irqsave(&tpkp->spinlock, flags);
+-	//ret = tpk_printk(buf, count);
+-	csr_print(buf, count);
+-	spin_unlock_irqrestore(&tpkp->spinlock, flags);
+-
+-	return count;
+-}
+-
+-/*
+- * TTY operations write_room function.
+- */
+-static unsigned int tpk_write_room(struct tty_struct *tty)
+-{
+-	return TPK_MAX_ROOM;
+-}
+-
+-/*
+- * TTY operations ioctl function.
+- */
+-static int tpk_ioctl(struct tty_struct *tty,
+-			unsigned int cmd, unsigned long arg)
+-{
+-	struct ttyprintk_port *tpkp = tty->driver_data;
+-
+-	if (!tpkp)
+-		return -EINVAL;
+-
+-	switch (cmd) {
+-	/* Stop TIOCCONS */
+-	case TIOCCONS:
+-		return -EOPNOTSUPP;
+-	default:
+-		return -ENOIOCTLCMD;
+-	}
+-	return 0;
+-}
+-
+-static const struct tty_operations ttyprintk_ops = {
+-	.open = tpk_open,
+-	.close = tpk_close,
+-	.write = tpk_write,
+-	.write_room = tpk_write_room,
+-	.ioctl = tpk_ioctl,
+-};
+-
+-static const struct tty_port_operations null_ops = { };
+-
+-static struct tty_driver *ttyprintk_driver;
+-
+-static int __init ttyprintk_init(void)
+-{
+-	int ret;
+-
+-	spin_lock_init(&tpk_port.spinlock);
+-
+-	ttyprintk_driver = tty_alloc_driver(1,
+-			TTY_DRIVER_RESET_TERMIOS |
+-			TTY_DRIVER_REAL_RAW |
+-			TTY_DRIVER_UNNUMBERED_NODE);
+-	if (IS_ERR(ttyprintk_driver))
+-		return PTR_ERR(ttyprintk_driver);
+-
+-	tty_port_init(&tpk_port.port);
+-	tpk_port.port.ops = &null_ops;
+-
+-	ttyprintk_driver->driver_name = "ttyprintk";
+-	ttyprintk_driver->name = "ttyprintk";
+-	ttyprintk_driver->major = TTYAUX_MAJOR;
+-	ttyprintk_driver->minor_start = 3;
+-	ttyprintk_driver->type = TTY_DRIVER_TYPE_CONSOLE;
+-	ttyprintk_driver->init_termios = tty_std_termios;
+-	ttyprintk_driver->init_termios.c_oflag = OPOST | OCRNL | ONOCR | ONLRET;
+-	tty_set_operations(ttyprintk_driver, &ttyprintk_ops);
+-	tty_port_link_device(&tpk_port.port, ttyprintk_driver, 0);
+-
+-	ret = tty_register_driver(ttyprintk_driver);
+-	if (ret < 0) {
+-		printk(KERN_ERR "Couldn't register ttyprintk driver\n");
+-		goto error;
+-	}
+-
+-	return 0;
+-
+-error:
+-	tty_driver_kref_put(ttyprintk_driver);
+-	tty_port_destroy(&tpk_port.port);
+-	return ret;
+-}
+-
+-static void __exit ttyprintk_exit(void)
+-{
+-	tty_unregister_driver(ttyprintk_driver);
+-	tty_driver_kref_put(ttyprintk_driver);
+-	tty_port_destroy(&tpk_port.port);
+-}
+-
+-
+-
+-
+-static struct tty_driver *csr_console_device(struct console *c, int *index) {
+-  *index = c->index;
+-  return ttyprintk_driver;
+-}
+-
+-
+-static int csr_console_setup(struct console *c, char *opts) {
+-  ttyprintk_init();
+-  
+-  return 0;
+-}
+-
+-
+-static void csr_console_write(struct console *c, const char *buf, unsigned len) {
+-  csr_print(buf, len);
+-}
+-
+-static void __exit csr_console_exit(void) {
+-  printk(KERN_INFO "HERE %s : %d\n", __PRETTY_FUNCTION__, __LINE__);  
+-  unregister_console(&csr_console);
+-}
+-
+-static int __init csr_console_init(void) {
+-  printk(KERN_INFO "HERE %s : %d\n", __PRETTY_FUNCTION__, __LINE__);
+-  register_console(&csr_console);
+-  return 0;
+-}
+-
+-module_init(csr_console_init);
+-module_exit(csr_console_exit);
+-
+-MODULE_LICENSE("GPL v2");
+-MODULE_DESCRIPTION("csr_console driver");
+-MODULE_AUTHOR("David Sheffield");
+diff --git a/include/asm-generic/hugetlb.h b/include/asm-generic/hugetlb.h
+index 90765bc03bba..594d5905f615 100644
+--- a/include/asm-generic/hugetlb.h
++++ b/include/asm-generic/hugetlb.h
+@@ -5,13 +5,10 @@
+ #include <linux/swap.h>
+ #include <linux/swapops.h>
+ 
+-#ifndef __HAVE_ARCH_MK_HUGE_PTE
+-static inline pte_t mk_huge_pte(struct vm_area_struct *vma, struct page *page,
+-				pgprot_t pgprot)
++static inline pte_t mk_huge_pte(struct page *page, pgprot_t pgprot)
+ {
+ 	return mk_pte(page, pgprot);
+ }
+-#endif
+ 
+ static inline unsigned long huge_pte_write(pte_t pte)
+ {
+diff --git a/include/linux/pgtable.h b/include/linux/pgtable.h
+index b629c48b980b..e8b2ac6bd2ae 100644
+--- a/include/linux/pgtable.h
++++ b/include/linux/pgtable.h
+@@ -598,27 +598,6 @@ static inline void pmdp_get_lockless_sync(void)
+ }
+ #endif
+ 
+-#ifndef pudp_get_lockless
+-static inline pud_t pudp_get_lockless(pud_t *pudp)
+-{
+-	return pudp_get(pudp);
+-}
+-#endif
+-
+-#ifndef p4dp_get_lockless
+-static inline p4d_t p4dp_get_lockless(p4d_t *p4dp)
+-{
+-	return p4dp_get(p4dp);
+-}
+-#endif
+-
+-#ifndef pgdp_get_lockless
+-static inline pgd_t pgdp_get_lockless(pgd_t *pgdp)
+-{
+-	return pgdp_get(pgdp);
+-}
+-#endif
+-
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+ #ifndef __HAVE_ARCH_PMDP_HUGE_GET_AND_CLEAR
+ static inline pmd_t pmdp_huge_get_and_clear(struct mm_struct *mm,
+diff --git a/kernel/events/core.c b/kernel/events/core.c
+index 84d49c60f55b..df27d08a7232 100644
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -7709,7 +7709,7 @@ static u64 perf_get_pgtable_size(struct mm_struct *mm, unsigned long addr)
+ 	pte_t *ptep, pte;
+ 
+ 	pgdp = pgd_offset(mm, addr);
+-	pgd = pgdp_get_lockless(pgdp);
++	pgd = READ_ONCE(*pgdp);
+ 	if (pgd_none(pgd))
+ 		return 0;
+ 
+@@ -7717,7 +7717,7 @@ static u64 perf_get_pgtable_size(struct mm_struct *mm, unsigned long addr)
+ 		return pgd_leaf_size(pgd);
+ 
+ 	p4dp = p4d_offset_lockless(pgdp, pgd, addr);
+-	p4d = p4dp_get_lockless(p4dp);
++	p4d = READ_ONCE(*p4dp);
+ 	if (!p4d_present(p4d))
+ 		return 0;
+ 
+@@ -7725,7 +7725,7 @@ static u64 perf_get_pgtable_size(struct mm_struct *mm, unsigned long addr)
+ 		return p4d_leaf_size(p4d);
+ 
+ 	pudp = pud_offset_lockless(p4dp, p4d, addr);
+-	pud = pudp_get_lockless(pudp);
++	pud = READ_ONCE(*pudp);
+ 	if (!pud_present(pud))
+ 		return 0;
+ 
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+index b0e3e4b5e249..beb808f4c367 100644
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -61,18 +61,6 @@
+ #include "braille.h"
+ #include "internal.h"
+ 
+-static void csr_print(char *buf, int len, int add_nl) {
+-  int i;
+-  for(i = 0; i < len; i++) {
+-    while(csr_read(0xc03) != 0) {}
+-    csr_write(0xc03, buf[i]);
+-  }
+-  if(add_nl) {
+-    while(csr_read(0xc03) != 0) {}    
+-    csr_write(0xc03, '\n');
+-  }
+-}
+-
+ int console_printk[4] = {
+ 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
+ 	MESSAGE_LOGLEVEL_DEFAULT,	/* default_message_loglevel */
+@@ -2332,19 +2320,12 @@ int vprintk_store(int facility, int level,
+ 	if (dev_info)
+ 		memcpy(&r.info->dev_info, dev_info, sizeof(r.info->dev_info));
+ 
+-
+-        if(r.info->flags & LOG_NEWLINE) {
+-	  csr_print(&r.text_buf[0], r.info->text_len, 1);
+-	}
+-	
+ 	/* A message without a trailing newline can be continued. */
+ 	if (!(flags & LOG_NEWLINE))
+ 		prb_commit(&e);
+ 	else
+ 		prb_final_commit(&e);
+ 
+-
+-	
+ 	ret = text_len + trunc_msg_len;
+ out:
+ 	printk_exit_irqrestore(recursion_ptr, irqflags);
+diff --git a/mm/debug_vm_pgtable.c b/mm/debug_vm_pgtable.c
+index 24839883d513..bc748f700a9e 100644
+--- a/mm/debug_vm_pgtable.c
++++ b/mm/debug_vm_pgtable.c
+@@ -438,7 +438,7 @@ static void __init pmd_huge_tests(struct pgtable_debug_args *args)
+ 	 * X86 defined pmd_set_huge() verifies that the given
+ 	 * PMD is not a populated non-leaf entry.
+ 	 */
+-	set_pmd(args->pmdp, __pmd(0));
++	WRITE_ONCE(*args->pmdp, __pmd(0));
+ 	WARN_ON(!pmd_set_huge(args->pmdp, __pfn_to_phys(args->fixed_pmd_pfn), args->page_prot));
+ 	WARN_ON(!pmd_clear_huge(args->pmdp));
+ 	pmd = pmdp_get(args->pmdp);
+@@ -458,7 +458,7 @@ static void __init pud_huge_tests(struct pgtable_debug_args *args)
+ 	 * X86 defined pud_set_huge() verifies that the given
+ 	 * PUD is not a populated non-leaf entry.
+ 	 */
+-	set_pud(args->pudp, __pud(0));
++	WRITE_ONCE(*args->pudp, __pud(0));
+ 	WARN_ON(!pud_set_huge(args->pudp, __pfn_to_phys(args->fixed_pud_pfn), args->page_prot));
+ 	WARN_ON(!pud_clear_huge(args->pudp));
+ 	pud = pudp_get(args->pudp);
+@@ -919,7 +919,7 @@ static void __init hugetlb_basic_tests(struct pgtable_debug_args *args)
+ 	 * as it was previously derived from a real kernel symbol.
+ 	 */
+ 	page = pfn_to_page(args->fixed_pmd_pfn);
+-	pte = mk_huge_pte(args->vma, page, args->page_prot);
++	pte = mk_huge_pte(page, args->page_prot);
+ 
+ 	WARN_ON(!huge_pte_dirty(huge_pte_mkdirty(pte)));
+ 	WARN_ON(!huge_pte_write(huge_pte_mkwrite(huge_pte_wrprotect(pte))));
+diff --git a/mm/gup.c b/mm/gup.c
+index db444d732028..ad0c8922dac3 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -1004,7 +1004,7 @@ static struct page *follow_pud_mask(struct vm_area_struct *vma,
+ 	struct mm_struct *mm = vma->vm_mm;
+ 
+ 	pudp = pud_offset(p4dp, address);
+-	pud = pudp_get_lockless(pudp);
++	pud = READ_ONCE(*pudp);
+ 	if (!pud_present(pud))
+ 		return no_page_table(vma, flags, address);
+ 	if (pud_leaf(pud)) {
+@@ -1029,7 +1029,7 @@ static struct page *follow_p4d_mask(struct vm_area_struct *vma,
+ 	p4d_t *p4dp, p4d;
+ 
+ 	p4dp = p4d_offset(pgdp, address);
+-	p4d = p4dp_get_lockless(p4dp);
++	p4d = READ_ONCE(*p4dp);
+ 	BUILD_BUG_ON(p4d_leaf(p4d));
+ 
+ 	if (!p4d_present(p4d) || p4d_bad(p4d))
+@@ -3259,7 +3259,7 @@ static int gup_fast_pud_range(p4d_t *p4dp, p4d_t p4d, unsigned long addr,
+ 
+ 	pudp = pud_offset_lockless(p4dp, p4d, addr);
+ 	do {
+-		pud_t pud = pudp_get_lockless(pudp);
++		pud_t pud = READ_ONCE(*pudp);
+ 
+ 		next = pud_addr_end(addr, end);
+ 		if (unlikely(!pud_present(pud)))
+@@ -3285,7 +3285,7 @@ static int gup_fast_p4d_range(pgd_t *pgdp, pgd_t pgd, unsigned long addr,
+ 
+ 	p4dp = p4d_offset_lockless(pgdp, pgd, addr);
+ 	do {
+-		p4d_t p4d = p4dp_get_lockless(p4dp);
++		p4d_t p4d = READ_ONCE(*p4dp);
+ 
+ 		next = p4d_addr_end(addr, end);
+ 		if (!p4d_present(p4d))
+@@ -3307,7 +3307,7 @@ static void gup_fast_pgd_range(unsigned long addr, unsigned long end,
+ 
+ 	pgdp = pgd_offset(current->mm, addr);
+ 	do {
+-		pgd_t pgd = pgdp_get_lockless(pgdp);
++		pgd_t pgd = READ_ONCE(*pgdp);
+ 
+ 		next = pgd_addr_end(addr, end);
+ 		if (pgd_none(pgd))
+diff --git a/mm/hmm.c b/mm/hmm.c
+index fa56b735883e..7e0229ae4a5a 100644
+--- a/mm/hmm.c
++++ b/mm/hmm.c
+@@ -423,7 +423,7 @@ static int hmm_vma_walk_pud(pud_t *pudp, unsigned long start, unsigned long end,
+ 	/* Normally we don't want to split the huge page */
+ 	walk->action = ACTION_CONTINUE;
+ 
+-	pud = pudp_get_lockless(pudp);
++	pud = READ_ONCE(*pudp);
+ 	if (!pud_present(pud)) {
+ 		spin_unlock(ptl);
+ 		return hmm_vma_walk_hole(start, end, -1, walk);
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index 2b33eb46408f..190fa05635f4 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -5140,10 +5140,10 @@ static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
+ 	unsigned int shift = huge_page_shift(hstate_vma(vma));
+ 
+ 	if (writable) {
+-		entry = huge_pte_mkwrite(huge_pte_mkdirty(mk_huge_pte(vma, page,
++		entry = huge_pte_mkwrite(huge_pte_mkdirty(mk_huge_pte(page,
+ 					 vma->vm_page_prot)));
+ 	} else {
+-		entry = huge_pte_wrprotect(mk_huge_pte(vma, page,
++		entry = huge_pte_wrprotect(mk_huge_pte(page,
+ 					   vma->vm_page_prot));
+ 	}
+ 	entry = pte_mkyoung(entry);
+diff --git a/mm/mapping_dirty_helpers.c b/mm/mapping_dirty_helpers.c
+index 8771432c3300..2f8829b3541a 100644
+--- a/mm/mapping_dirty_helpers.c
++++ b/mm/mapping_dirty_helpers.c
+@@ -149,7 +149,7 @@ static int wp_clean_pud_entry(pud_t *pud, unsigned long addr, unsigned long end,
+ 			      struct mm_walk *walk)
+ {
+ #ifdef CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD
+-	pud_t pudval = pudp_get_lockless(pud);
++	pud_t pudval = READ_ONCE(*pud);
+ 
+ 	/* Do not split a huge pud */
+ 	if (pud_trans_huge(pudval) || pud_devmap(pudval)) {
+diff --git a/mm/memory.c b/mm/memory.c
+index 03ee104cb009..bdf77a3ec47b 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -6428,12 +6428,12 @@ int follow_pfnmap_start(struct follow_pfnmap_args *args)
+ 		goto out;
+ 
+ 	p4dp = p4d_offset(pgdp, address);
+-	p4d = p4dp_get_lockless(p4dp);
++	p4d = READ_ONCE(*p4dp);
+ 	if (p4d_none(p4d) || unlikely(p4d_bad(p4d)))
+ 		goto out;
+ 
+ 	pudp = pud_offset(p4dp, address);
+-	pud = pudp_get_lockless(pudp);
++	pud = READ_ONCE(*pudp);
+ 	if (pud_none(pud))
+ 		goto out;
+ 	if (pud_leaf(pud)) {
+diff --git a/mm/mprotect.c b/mm/mprotect.c
+index a165ab597a73..6f450af3252e 100644
+--- a/mm/mprotect.c
++++ b/mm/mprotect.c
+@@ -447,7 +447,7 @@ static inline long change_pud_range(struct mmu_gather *tlb,
+ 			break;
+ 		}
+ 
+-		pud = pudp_get_lockless(pudp);
++		pud = READ_ONCE(*pudp);
+ 		if (pud_none(pud))
+ 			continue;
+ 
+diff --git a/mm/ptdump.c b/mm/ptdump.c
+index b8a2ad43392f..106e1d66e9f9 100644
+--- a/mm/ptdump.c
++++ b/mm/ptdump.c
+@@ -30,7 +30,7 @@ static int ptdump_pgd_entry(pgd_t *pgd, unsigned long addr,
+ 			    unsigned long next, struct mm_walk *walk)
+ {
+ 	struct ptdump_state *st = walk->private;
+-	pgd_t val = pgdp_get_lockless(pgd);
++	pgd_t val = READ_ONCE(*pgd);
+ 
+ #if CONFIG_PGTABLE_LEVELS > 4 && \
+ 		(defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS))
+@@ -53,7 +53,7 @@ static int ptdump_p4d_entry(p4d_t *p4d, unsigned long addr,
+ 			    unsigned long next, struct mm_walk *walk)
+ {
+ 	struct ptdump_state *st = walk->private;
+-	p4d_t val = p4dp_get_lockless(p4d);
++	p4d_t val = READ_ONCE(*p4d);
+ 
+ #if CONFIG_PGTABLE_LEVELS > 3 && \
+ 		(defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS))
+@@ -76,7 +76,7 @@ static int ptdump_pud_entry(pud_t *pud, unsigned long addr,
+ 			    unsigned long next, struct mm_walk *walk)
+ {
+ 	struct ptdump_state *st = walk->private;
+-	pud_t val = pudp_get_lockless(pud);
++	pud_t val = READ_ONCE(*pud);
+ 
+ #if CONFIG_PGTABLE_LEVELS > 2 && \
+ 		(defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS))
+@@ -99,7 +99,7 @@ static int ptdump_pmd_entry(pmd_t *pmd, unsigned long addr,
+ 			    unsigned long next, struct mm_walk *walk)
+ {
+ 	struct ptdump_state *st = walk->private;
+-	pmd_t val = pmdp_get_lockless(pmd);
++	pmd_t val = READ_ONCE(*pmd);
+ 
+ #if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
+ 	if (pmd_page(val) == virt_to_page(lm_alias(kasan_early_shadow_pte)))
+diff --git a/mm/sparse-vmemmap.c b/mm/sparse-vmemmap.c
+index 6621fb096fd0..c0388b2e959d 100644
+--- a/mm/sparse-vmemmap.c
++++ b/mm/sparse-vmemmap.c
+@@ -337,7 +337,7 @@ int __meminit vmemmap_populate_hugepages(unsigned long start, unsigned long end,
+ 			return -ENOMEM;
+ 
+ 		pmd = pmd_offset(pud, addr);
+-		if (pmd_none(pmdp_get_lockless(pmd))) {
++		if (pmd_none(READ_ONCE(*pmd))) {
+ 			void *p;
+ 
+ 			p = vmemmap_alloc_block_buf(PMD_SIZE, node, altmap);
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 2bc78c339fd1..28ba2b06fc7d 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3608,7 +3608,7 @@ static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
+ 	pud = pud_offset(p4d, start & P4D_MASK);
+ restart:
+ 	for (i = pud_index(start), addr = start; addr != end; i++, addr = next) {
+-		pud_t val = pudp_get_lockless(&pud[i]);
++		pud_t val = READ_ONCE(pud[i]);
+ 
+ 		next = pud_addr_end(addr, end);
+ 
